@@ -16,10 +16,10 @@ DEFAULT_CAMERA_SYMLINK = "/dev/video-camera0"
 _MJPEG_BONUS: float = 3.0
 
 
-def get_best_resolution(device_path: str) -> tuple[int, int] | None:
+def get_best_resolution(device_path: str) -> tuple[int, int, float, str] | None:
     """Query ``v4l2-ctl`` for all discrete resolutions/frame-rates on
-    *device_path* and return ``(width, height)`` for the entry with the
-    highest ``width × height × fps × format_bonus`` score.
+    *device_path* and return ``(width, height, fps, fmt)`` for the entry with
+    the highest ``width × height × fps × format_bonus`` score.
 
     MJPEG receives a bonus multiplier (``_MJPEG_BONUS``) so it is preferred
     over raw formats (e.g. YUYV) at the same resolution when both are listed.
@@ -39,10 +39,11 @@ def get_best_resolution(device_path: str) -> tuple[int, int] | None:
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return None
 
-    best: tuple[int, int] | None = None
+    best: tuple[int, int, float, str] | None = None
     best_score: float = -1.0
     current_w: int | None = None
     current_h: int | None = None
+    current_fmt: str = "YUYV"
     current_fmt_bonus: float = 1.0
 
     size_re = re.compile(r"Size:\s+Discrete\s+(\d+)x(\d+)")
@@ -52,8 +53,8 @@ def get_best_resolution(device_path: str) -> tuple[int, int] | None:
     for line in result.stdout.splitlines():
         fmt_m = fmt_re.search(line)
         if fmt_m and "Size" not in line:
-            fmt = fmt_m.group(1)
-            current_fmt_bonus = _MJPEG_BONUS if fmt == "MJPG" else 1.0
+            current_fmt = fmt_m.group(1)
+            current_fmt_bonus = _MJPEG_BONUS if current_fmt == "MJPG" else 1.0
             current_w = None
             current_h = None
             continue
@@ -68,7 +69,7 @@ def get_best_resolution(device_path: str) -> tuple[int, int] | None:
                 score = current_w * current_h * fps * current_fmt_bonus
                 if score > best_score:
                     best_score = score
-                    best = (current_w, current_h)
+                    best = (current_w, current_h, fps, current_fmt)
 
     return best
 
@@ -164,9 +165,12 @@ def open_camera(source: int | str) -> cv2.VideoCapture | None:
     if device_path is not None:
         best = get_best_resolution(device_path)
         if best is not None:
-            w, h = best
+            w, h, fps, fmt = best
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
-            print(f"Auto-selected resolution: {w}x{h} (best score for '{device_path}')")
+            cap.set(cv2.CAP_PROP_FPS, fps)
+            if fmt == "MJPG":
+                cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+            print(f"Auto-selected: {w}x{h} @ {fps:.0f} fps ({fmt}) for '{device_path}'")
 
     return cap

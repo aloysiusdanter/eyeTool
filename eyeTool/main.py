@@ -16,6 +16,7 @@ import sys
 import time
 
 import cv2
+import numpy as np
 
 from camera import open_camera, resolve_camera_source
 
@@ -120,6 +121,24 @@ def _check_display() -> bool:
     return True
 
 
+def letterbox_frame(frame: np.ndarray, target_w: int, target_h: int) -> np.ndarray:
+    """Scale frame to fit target dimensions while preserving aspect ratio.
+
+    Returns a canvas of size (target_h, target_w, 3) with the scaled frame
+    centered and black bars filling the remaining space.
+    """
+    h, w = frame.shape[:2]
+    scale = min(target_w / w, target_h / h)
+    new_w = int(w * scale)
+    new_h = int(h * scale)
+    resized = cv2.resize(frame, (new_w, new_h))
+    canvas = np.zeros((target_h, target_w, 3), dtype=np.uint8)
+    y_offset = (target_h - new_h) // 2
+    x_offset = (target_w - new_w) // 2
+    canvas[y_offset:y_offset+new_h, x_offset:x_offset+new_w] = resized
+    return canvas
+
+
 def load_camera_feed(source: int | str) -> None:
     """Initialize camera and display a live feed. Press 'q' to quit."""
     if not _check_display():
@@ -132,8 +151,16 @@ def load_camera_feed(source: int | str) -> None:
     _quit_requested = False
     signal.signal(signal.SIGINT, _signal_handler)
     signal.signal(signal.SIGTERM, _signal_handler)
-    print(f"Camera feed started on '{source}'. Press 'q'/ESC on the window, or Ctrl+C here to quit.")
+    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fps = cap.get(cv2.CAP_PROP_FPS)
+
+    # Scale to display size (built-in LCD is 800x480)
+    display_w, display_h = 800, 480
+    print(f"Feed info: {w}x{h} @ {fps:.1f} fps (letterboxed to {display_w}x{display_h})  |  source: {source}  |  display: {os.environ.get('DISPLAY', '?')}")
+    print("Press 'q'/ESC on the window, or Ctrl+C here to quit.")
     cv2.namedWindow("eyeTool - Camera Feed", cv2.WINDOW_NORMAL)
+    first_frame = True
     try:
         while not _quit_requested:
             ret, frame = cap.read()
@@ -141,7 +168,11 @@ def load_camera_feed(source: int | str) -> None:
                 print("Error: Could not read frame.")
                 break
 
-            cv2.imshow("eyeTool - Camera Feed", frame)
+            frame_letterboxed = letterbox_frame(frame, display_w, display_h)
+            cv2.imshow("eyeTool - Camera Feed", frame_letterboxed)
+            if first_frame:
+                cv2.setWindowProperty("eyeTool - Camera Feed", cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+                first_frame = False
             key = cv2.waitKey(1) & 0xFF
             if key in (ord("q"), ord("Q"), 27):  # 27 = ESC
                 break
