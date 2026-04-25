@@ -262,8 +262,8 @@ def interactive_menu(source: int | str, output: str) -> None:
     print("1. Live camera feed")
     print("2. Capture single image")
     print("3. Probe camera (no GUI)")
-    print("4. Exit")
-    print("5. Select display target")
+    print("4. Select display target")
+    print("5. Exit")
 
     while True:
         choice = input("\nEnter your choice (1-5): ").strip()
@@ -274,10 +274,10 @@ def interactive_menu(source: int | str, output: str) -> None:
         elif choice == "3":
             probe_camera(source)
         elif choice == "4":
+            select_display_menu()
+        elif choice == "5":
             print("Goodbye!")
             break
-        elif choice == "5":
-            select_display_menu()
         else:
             print("Invalid choice. Please enter 1, 2, 3, 4, or 5.")
 

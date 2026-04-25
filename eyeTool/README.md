@@ -206,10 +206,10 @@ python main.py --mode probe                     # grab 1 frame, no GUI
    capture, `q` to quit.
 3. **Probe camera (no GUI)** - Open the camera, grab one frame, and print
    its resolution and reported FPS. Useful over SSH without X.
-4. **Exit** - Close the application.
-5. **Select display target** - Choose which X display (`cv2.imshow` windows
+4. **Select display target** - Choose which X display `cv2.imshow` windows
    are sent to. Lists all detected displays; `:0` is the built-in LCD,
    `:1` is the HDMI output (when connected).
+5. **Exit** - Close the application.
 
 ### Display target
 
