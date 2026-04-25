@@ -1,2 +1,13 @@
+# eyeTool Python dependencies
+# Target platform: FriendlyElec NanoPi M6 (Rockchip RK3588S, arm64)
+# Target OS:       FriendlyElec Ubuntu 24.04 Desktop (pre-installed)
+# Target Python:   3.12+ (3.14 preferred; see README.md for setup)
+#
+# Notes for arm64 / NanoPi M6:
+# - opencv-python publishes manylinux aarch64 wheels; pip should not need to
+#   build from source. If it does, install the Debian package instead
+#   (`sudo apt install python3-opencv`) and drop opencv-python from this file.
+# - System libs required by the opencv-python wheel (libGL, libX*, etc.) are
+#   listed in README.md under "System Prerequisites".
 opencv-python==4.9.0.80
 numpy==1.26.4
