@@ -207,35 +207,67 @@ python main.py --mode probe                     # grab 1 frame, no GUI
 3. **Probe camera (no GUI)** - Open the camera, grab one frame, and print
    its resolution and reported FPS. Useful over SSH without X.
 4. **Exit** - Close the application.
+5. **Select display target** - Choose which X display (`cv2.imshow` windows
+   are sent to. Lists all detected displays; `:0` is the built-in LCD,
+   `:1` is the HDMI output (when connected).
+
+### Display target
+
+eyeTool can direct `cv2.imshow` windows to any X display connected to the
+NanoPi M6. The NanoPi M6 runs **GNOME on Wayland**; XWayland provides X11
+compatibility sockets that Qt5 (bundled with the `opencv-python` wheel) uses
+to open windows.
+
+| Display | Output |
+|---------|--------|
+| `:0`    | Built-in LCD (default) |
+| `:1`    | HDMI monitor (when connected) |
+
+**Selecting the display at startup (CLI):**
+
+```bash
+python main.py --display :0        # built-in LCD (default)
+python main.py --display :1        # HDMI monitor
+```
+
+**Selecting the display at runtime (menu option 5):**
+
+From the interactive menu, choose option **5. Select display target**. The
+menu shows all detected X displays with labels and marks the current one.
+Type the number or the display string (e.g. `:1`) to switch.
+
+Auto-detection runs at startup: if `$DISPLAY` is not set (typical over SSH),
+eyeTool scans `/tmp/.X11-unix/` for XWayland sockets and picks `:0` (the
+built-in LCD) automatically.
 
 ### Remote development over SSH
 
-The FriendlyElec Ubuntu 24.04 Desktop image runs a **Wayland** compositor,
-but the `opencv-python` wheel bundles a Qt backend that still requires an
-X11 connection. When you SSH in as `pi`, simply exporting `DISPLAY=:0.0` is
-not enough; you will get an *"Authorization required"* or *"could not
-connect to display"* error because your SSH session lacks the X authority
-cookie for the local session.
+The FriendlyElec Ubuntu 24.04 Desktop image runs a **Wayland** compositor.
+The `opencv-python` pip wheel bundles a **Qt5** backend that speaks X11 only;
+it connects to Wayland through XWayland automatically.
 
-To make `cv2.imshow` windows pop up on the **built-in LCD** while working
-remotely:
+When you SSH in as `pi`, eyeTool auto-detects the XWayland display and sets
+`DISPLAY=:0` for you. You do not need to export `DISPLAY` manually.
+
+However, the local X session may still require an X authority cookie. If
+`cv2.imshow` fails with *"Authorization required"* or *"could not connect to
+display"*:
 
 1. **On the NanoPi display itself** (local keyboard or a separate VNC
    session), open a terminal and run:
    ```bash
    xhost +local:
    ```
-   This allows any local user (including the `pi` user behind your SSH
-   connection) to open windows on the running display.
+   This grants any local user (including your SSH session) permission to open
+   windows on the running display.
 
-2. **From your SSH session**, export the display and launch eyeTool:
+2. **From your SSH session**, launch eyeTool normally:
    ```bash
-   export DISPLAY=:0.0
    python main.py --mode feed --device /dev/video20
    ```
 
-The live feed window now appears on the NanoPi's embedded display.
-Press `q` to quit.
+The live feed window appears on the NanoPi's embedded display. Press `q` to
+quit.
 
 > **Security note:** `xhost +local:` is convenient for development on a
 > trusted local network. Disable it again with `xhost -local:` when you are
