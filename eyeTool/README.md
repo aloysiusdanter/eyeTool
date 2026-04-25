@@ -5,9 +5,13 @@ targeted at the **FriendlyElec NanoPi M6** single-board computer.
 
 ## Features
 
-- Live camera feed display
+- Live camera feed display with letterboxed fullscreen output on the
+  built-in 800x480 LCD
+- Real-time **human detection** with YOLOv8n on the RK3588 NPU (~17 FPS
+  end-to-end on 1280x720 capture; see [NPU detection](#npu-detection))
 - Single image capture
-- Simple command-line interface
+- Auto-detected XWayland display target with a runtime selector
+- Interactive menu and CLI flags
 
 ## Target Hardware
 
@@ -209,7 +213,32 @@ python main.py --mode probe                     # grab 1 frame, no GUI
 4. **Select display target** - Choose which X display `cv2.imshow` windows
    are sent to. Lists all detected displays; `:0` is the built-in LCD,
    `:1` is the HDMI output (when connected).
-5. **Exit** - Close the application.
+5. **Detection settings** - Toggle person detection on/off, set the
+   confidence threshold, and pick a target FPS for the feed loop.
+6. **Exit** - Close the application.
+
+### NPU detection
+
+Human detection runs on the **RK3588 NPU** via `rknn-toolkit-lite2`,
+not on the CPU. The model file `yolov8n.rknn` (int8, 640x640 input,
+9-output airockchip head) is **not committed** -- it is built offline
+from the airockchip ONNX. To refresh it:
+
+1. Build the `.rknn` on a PC following
+   `reference_info/HANDOFF_TO_NANOPI.md` and
+   `reference_info/CONVERSION_PLAYBOOK.md`.
+2. Copy the artefact next to `main.py`:
+
+   ```bash
+   scp yolov8n.rknn pi@<nanopi-ip>:~/eyeTool/eyeTool/yolov8n.rknn
+   ```
+
+The runtime library `librknnrt.so` is shipped in the FriendlyElec
+Ubuntu image at `/usr/lib/librknnrt.so`. If it's missing, install
+`rknpu2-runtime` from FriendlyElec or the airockchip release.
+
+Postprocess (DFL decode + NMS) is in `rknn_yolov8.py` -- pure NumPy,
+no PyTorch dependency.
 
 ### Display target
 

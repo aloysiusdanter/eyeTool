@@ -33,3 +33,7 @@ ENV/
 # OS
 .DS_Store
 Thumbs.db
+
+# RKNN model artefacts (rebuilt offline; see reference_info/HANDOFF_TO_NANOPI.md)
+*.rknn
+yolov8n.pt

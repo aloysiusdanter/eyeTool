@@ -19,8 +19,38 @@ import cv2
 import numpy as np
 
 from camera import open_camera, resolve_camera_source
+from rknn_yolov8 import infer as rknn_infer, warmup as rknn_warmup
 
 _quit_requested = False
+
+_detection_enabled = True
+_detection_confidence = 0.5
+_target_fps = 30
+
+PERSON_CLASS_ID = 0  # COCO class index for "person"
+
+
+def draw_detections(frame: np.ndarray, confidence: float = 0.5) -> int:
+    """Run YOLOv8n person detection on *frame* using the RK3588 NPU.
+
+    Draws green bounding boxes with confidence in-place on *frame* and
+    returns the number of persons detected.
+    """
+    boxes, classes, scores, scale, (pad_w, pad_h) = rknn_infer(frame, conf_thres=confidence)
+    count = 0
+    for (x1, y1, x2, y2), score, cls in zip(boxes, scores, classes):
+        if int(cls) != PERSON_CLASS_ID:
+            continue
+        # Map back from 640-input letterboxed space to original frame coords
+        x1 = int((x1 - pad_w) / scale)
+        x2 = int((x2 - pad_w) / scale)
+        y1 = int((y1 - pad_h) / scale)
+        y2 = int((y2 - pad_h) / scale)
+        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        cv2.putText(frame, f"person {score:.2f}", (x1, max(0, y1 - 6)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+        count += 1
+    return count
 
 
 def detect_x_displays() -> list[str]:
@@ -157,10 +187,20 @@ def load_camera_feed(source: int | str) -> None:
 
     # Scale to display size (built-in LCD is 800x480)
     display_w, display_h = 800, 480
+    det_status = "ON" if _detection_enabled else "OFF"
     print(f"Feed info: {w}x{h} @ {fps:.1f} fps (letterboxed to {display_w}x{display_h})  |  source: {source}  |  display: {os.environ.get('DISPLAY', '?')}")
+    print(f"Detection: {det_status}  |  confidence: {_detection_confidence}  |  target FPS: {_target_fps}")
     print("Press 'q'/ESC on the window, or Ctrl+C here to quit.")
+
+    if _detection_enabled:
+        # Warm up NPU so the first frame doesn't stall on JIT.
+        rknn_warmup()
+
     cv2.namedWindow("eyeTool - Camera Feed", cv2.WINDOW_NORMAL)
     first_frame = True
+    frame_interval = 1.0 / _target_fps if _target_fps > 0 else 0
+    prev_time = time.monotonic()
+    actual_fps = 0.0
     try:
         while not _quit_requested:
             ret, frame = cap.read()
@@ -168,12 +208,27 @@ def load_camera_feed(source: int | str) -> None:
                 print("Error: Could not read frame.")
                 break
 
+            if _detection_enabled:
+                draw_detections(frame, _detection_confidence)
+
             frame_letterboxed = letterbox_frame(frame, display_w, display_h)
+
+            now = time.monotonic()
+            elapsed = now - prev_time
+            if elapsed > 0:
+                actual_fps = 1.0 / elapsed
+            prev_time = now
+
+            cv2.putText(frame_letterboxed, f"FPS: {actual_fps:.0f}", (10, 25),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+
             cv2.imshow("eyeTool - Camera Feed", frame_letterboxed)
             if first_frame:
                 cv2.setWindowProperty("eyeTool - Camera Feed", cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
                 first_frame = False
-            key = cv2.waitKey(1) & 0xFF
+
+            wait_ms = max(1, int(frame_interval * 1000 - elapsed * 1000))
+            key = cv2.waitKey(wait_ms) & 0xFF
             if key in (ord("q"), ord("Q"), 27):  # 27 = ESC
                 break
             if cv2.getWindowProperty("eyeTool - Camera Feed", cv2.WND_PROP_VISIBLE) < 1:
@@ -286,18 +341,64 @@ def select_display_menu() -> None:
     print("NanoPi display: xhost +local:")
 
 
+def detection_settings_menu() -> None:
+    """Interactive sub-menu for YOLO detection settings."""
+    global _detection_enabled, _detection_confidence, _target_fps
+    while True:
+        det_status = "ON" if _detection_enabled else "OFF"
+        print(f"\n--- Detection Settings ---")
+        print(f"  1. Toggle detection [{det_status}]")
+        print(f"  2. Set confidence threshold [{_detection_confidence:.2f}]")
+        print(f"  3. Set target FPS [{_target_fps}]")
+        print(f"  4. Back to main menu")
+        raw = input("Enter choice (1-4): ").strip()
+        if raw == "1":
+            _detection_enabled = not _detection_enabled
+            print(f"Detection {'enabled' if _detection_enabled else 'disabled'}.")
+        elif raw == "2":
+            val = input(f"Confidence threshold (0.0-1.0) [{_detection_confidence:.2f}]: ").strip()
+            if val:
+                try:
+                    v = float(val)
+                    if 0.0 <= v <= 1.0:
+                        _detection_confidence = v
+                        print(f"Confidence threshold set to {_detection_confidence:.2f}.")
+                    else:
+                        print("Value must be between 0.0 and 1.0.")
+                except ValueError:
+                    print("Invalid number.")
+        elif raw == "3":
+            val = input(f"Target FPS (1-120) [{_target_fps}]: ").strip()
+            if val:
+                try:
+                    v = int(val)
+                    if 1 <= v <= 120:
+                        _target_fps = v
+                        print(f"Target FPS set to {_target_fps}.")
+                    else:
+                        print("Value must be between 1 and 120.")
+                except ValueError:
+                    print("Invalid number.")
+        elif raw == "4":
+            break
+        else:
+            print("Invalid choice.")
+
+
 def interactive_menu(source: int | str, output: str) -> None:
     print("=== eyeTool - Camera Application ===")
     print(f"Camera source: {source}")
     print(f"Display target: {os.environ.get('DISPLAY', '(not set)')}")
+    det_status = "ON" if _detection_enabled else "OFF"
     print("1. Live camera feed")
     print("2. Capture single image")
     print("3. Probe camera (no GUI)")
     print("4. Select display target")
-    print("5. Exit")
+    print(f"5. Detection settings [{det_status}]")
+    print("6. Exit")
 
     while True:
-        choice = input("\nEnter your choice (1-5): ").strip()
+        choice = input("\nEnter your choice (1-6): ").strip()
         if choice == "1":
             load_camera_feed(source)
         elif choice == "2":
@@ -307,10 +408,12 @@ def interactive_menu(source: int | str, output: str) -> None:
         elif choice == "4":
             select_display_menu()
         elif choice == "5":
+            detection_settings_menu()
+        elif choice == "6":
             print("Goodbye!")
             break
         else:
-            print("Invalid choice. Please enter 1, 2, 3, 4, or 5.")
+            print("Invalid choice. Please enter 1-6.")
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:

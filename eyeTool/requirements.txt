@@ -11,3 +11,8 @@
 #   listed in README.md under "System Prerequisites".
 opencv-python==4.9.0.80
 numpy==1.26.4
+# RK3588 NPU runtime for YOLOv8 inference. The .rknn model is built
+# offline (see ../reference_info/HANDOFF_TO_NANOPI.md) and dropped next
+# to main.py. Do NOT install rknn-toolkit2 here -- that's the converter
+# and only ships x86_64 wheels.
+rknn-toolkit-lite2>=2.3.0
