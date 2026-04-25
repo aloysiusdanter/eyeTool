@@ -11,6 +11,7 @@ import argparse
 import glob
 import os
 import signal
+import subprocess
 import sys
 import time
 
@@ -33,18 +34,56 @@ def detect_x_displays() -> list[str]:
     return displays
 
 
+def _merge_mutter_xauth(display: str) -> bool:
+    """Merge GNOME/mutter's XWayland auth cookie into ~/.Xauthority.
+
+    GNOME creates a private Xauthority file for XWayland at a path like
+    /run/user/<uid>/.mutter-Xwaylandauth.XXXXXX. When connecting over SSH
+    the session lacks that cookie, causing "Authorization required" errors.
+    This function extracts the cookie for *display* and merges it into
+    ~/.Xauthority so cv2.imshow works from SSH without manual xauth steps.
+
+    Returns True if the merge succeeded, False otherwise.
+    """
+    mutter_files = glob.glob(f"/run/user/{os.getuid()}/.mutter-Xwaylandauth.*")
+    if not mutter_files:
+        return False
+    mutter_auth = mutter_files[0]
+    xauth_home = os.path.expanduser("~/.Xauthority")
+    try:
+        extract = subprocess.run(
+            ["xauth", "-f", mutter_auth, "extract", "-", display],
+            capture_output=True,
+            timeout=5,
+        )
+        if extract.returncode != 0:
+            return False
+        merge = subprocess.run(
+            ["xauth", "-f", xauth_home, "merge", "-"],
+            input=extract.stdout,
+            capture_output=True,
+            timeout=5,
+        )
+        return merge.returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+
+
 def set_display(display: str) -> None:
-    """Set the DISPLAY environment variable and attempt to locate XAUTHORITY."""
+    """Set DISPLAY and auto-configure XAUTHORITY for GNOME/XWayland sessions.
+
+    Merges the mutter XWayland auth cookie into ~/.Xauthority so that
+    cv2.imshow works from SSH without requiring manual xhost or xauth steps.
+    """
     os.environ["DISPLAY"] = display
-    if "XAUTHORITY" not in os.environ:
-        candidates = [
-            os.path.expanduser("~/.Xauthority"),
-            f"/run/user/{os.getuid()}/.Xauthority",
-        ]
-        for path in candidates:
-            if os.path.exists(path):
-                os.environ["XAUTHORITY"] = path
-                break
+    _merge_mutter_xauth(display)
+    xauth_home = os.path.expanduser("~/.Xauthority")
+    if os.path.exists(xauth_home):
+        os.environ["XAUTHORITY"] = xauth_home
+    elif "XAUTHORITY" not in os.environ:
+        mutter_files = glob.glob(f"/run/user/{os.getuid()}/.mutter-Xwaylandauth.*")
+        if mutter_files:
+            os.environ["XAUTHORITY"] = mutter_files[0]
 
 
 def auto_set_display() -> str | None:
