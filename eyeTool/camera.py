@@ -148,6 +148,10 @@ def open_camera(source: int | str) -> cv2.VideoCapture | None:
     MIPI-CSI (``/dev/video-camera0``) is left untouched.
     """
     cap = cv2.VideoCapture(source)
+    # Minimise kernel-side UVC buffering so cap.read() returns the freshest
+    # frame, not one queued up to ~100 ms ago. The V4L2 backend honours this
+    # on most USB UVC devices; harmless if ignored.
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
     if not cap.isOpened():
         print(f"Error: Could not open camera '{source}'.")
         print("Hints:")

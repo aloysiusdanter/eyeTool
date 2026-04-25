@@ -20,12 +20,15 @@ import numpy as np
 
 from camera import open_camera, resolve_camera_source
 from rknn_yolov8 import infer as rknn_infer, warmup as rknn_warmup
+from pipeline import Detector, FrameSource, overlay_detections
 
 _quit_requested = False
 
 _detection_enabled = True
 _detection_confidence = 0.5
 _target_fps = 30
+_detect_every_n = 1  # run NPU on every Nth captured frame
+_use_multi_core = False  # use 3 NPU cores (round-robin)
 
 PERSON_CLASS_ID = 0  # COCO class index for "person"
 
@@ -170,7 +173,10 @@ def letterbox_frame(frame: np.ndarray, target_w: int, target_h: int) -> np.ndarr
 
 
 def load_camera_feed(source: int | str) -> None:
-    """Initialize camera and display a live feed. Press 'q' to quit."""
+    """Async pipeline: capture thread + detector thread + display loop.
+
+    Press 'q'/ESC on the window or Ctrl+C on the console to quit.
+    """
     if not _check_display():
         return
     cap = open_camera(source)
@@ -189,51 +195,85 @@ def load_camera_feed(source: int | str) -> None:
     display_w, display_h = 800, 480
     det_status = "ON" if _detection_enabled else "OFF"
     print(f"Feed info: {w}x{h} @ {fps:.1f} fps (letterboxed to {display_w}x{display_h})  |  source: {source}  |  display: {os.environ.get('DISPLAY', '?')}")
-    print(f"Detection: {det_status}  |  confidence: {_detection_confidence}  |  target FPS: {_target_fps}")
+    multi_status = "3-CORE" if _use_multi_core else "1-CORE"
+    print(f"Detection: {det_status}  |  confidence: {_detection_confidence}  |  target FPS: {_target_fps}  |  detect every N: {_detect_every_n}  |  NPU: {multi_status}")
     print("Press 'q'/ESC on the window, or Ctrl+C here to quit.")
 
+    frame_source = FrameSource(cap)
+    detector: Detector | None = None
+    frame_source.start()
     if _detection_enabled:
-        # Warm up NPU so the first frame doesn't stall on JIT.
-        rknn_warmup()
+        detector = Detector(frame_source,
+                            conf_thres=_detection_confidence,
+                            detect_every_n=_detect_every_n,
+                            use_multi_core=_use_multi_core)
+        detector.start()
 
     cv2.namedWindow("eyeTool - Camera Feed", cv2.WINDOW_NORMAL)
     first_frame = True
     frame_interval = 1.0 / _target_fps if _target_fps > 0 else 0
     prev_time = time.monotonic()
     actual_fps = 0.0
+    last_stats_ts = time.monotonic()
     try:
         while not _quit_requested:
-            ret, frame = cap.read()
-            if not ret:
-                print("Error: Could not read frame.")
-                break
+            if not frame_source.wait_new(timeout=1.0):
+                # Camera stalled; loop back and re-check _quit_requested.
+                continue
+            snap = frame_source.get_latest()
+            if snap is None:
+                continue
+            frame, frame_ts = snap
+            # Work on a shallow copy so the capture thread can safely
+            # overwrite the underlying buffer on its next read.
+            frame = frame.copy()
 
-            if _detection_enabled:
-                draw_detections(frame, _detection_confidence)
+            now = time.monotonic()
+            if detector is not None:
+                det = detector.get_latest()
+                overlay_detections(frame, det, now)
 
             frame_letterboxed = letterbox_frame(frame, display_w, display_h)
 
-            now = time.monotonic()
             elapsed = now - prev_time
             if elapsed > 0:
                 actual_fps = 1.0 / elapsed
             prev_time = now
 
-            cv2.putText(frame_letterboxed, f"FPS: {actual_fps:.0f}", (10, 25),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+            cv2.putText(frame_letterboxed, f"FPS: {actual_fps:.0f}",
+                        (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
+                        (0, 255, 255), 2)
+
+            # Periodic pipeline stats on the console.
+            if now - last_stats_ts > 2.0:
+                det_fps = detector.fps() if detector else 0.0
+                print(f"Pipeline: capture={frame_source.fps():5.1f} Hz  "
+                      f"detect={det_fps:5.1f} Hz  display={actual_fps:5.1f} Hz")
+                last_stats_ts = now
 
             cv2.imshow("eyeTool - Camera Feed", frame_letterboxed)
             if first_frame:
-                cv2.setWindowProperty("eyeTool - Camera Feed", cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+                cv2.setWindowProperty("eyeTool - Camera Feed",
+                                      cv2.WND_PROP_FULLSCREEN,
+                                      cv2.WINDOW_FULLSCREEN)
                 first_frame = False
+            else:
+                # Keep fullscreen property set (XWayland sometimes loses it)
+                cv2.setWindowProperty("eyeTool - Camera Feed",
+                                      cv2.WND_PROP_FULLSCREEN,
+                                      cv2.WINDOW_FULLSCREEN)
 
             wait_ms = max(1, int(frame_interval * 1000 - elapsed * 1000))
             key = cv2.waitKey(wait_ms) & 0xFF
             if key in (ord("q"), ord("Q"), 27):  # 27 = ESC
                 break
-            if cv2.getWindowProperty("eyeTool - Camera Feed", cv2.WND_PROP_VISIBLE) < 1:
+            if cv2.getWindowProperty("eyeTool - Camera Feed",
+                                     cv2.WND_PROP_VISIBLE) < 1:
                 break
     finally:
+        if detector is not None:
+            detector.stop()
+        frame_source.stop()
         cap.release()
         cv2.destroyAllWindows()
         print("Camera feed closed.")
@@ -343,15 +383,18 @@ def select_display_menu() -> None:
 
 def detection_settings_menu() -> None:
     """Interactive sub-menu for YOLO detection settings."""
-    global _detection_enabled, _detection_confidence, _target_fps
+    global _detection_enabled, _detection_confidence, _target_fps, _detect_every_n, _use_multi_core
     while True:
         det_status = "ON" if _detection_enabled else "OFF"
+        multi_status = "3-CORE" if _use_multi_core else "1-CORE"
         print(f"\n--- Detection Settings ---")
         print(f"  1. Toggle detection [{det_status}]")
         print(f"  2. Set confidence threshold [{_detection_confidence:.2f}]")
-        print(f"  3. Set target FPS [{_target_fps}]")
-        print(f"  4. Back to main menu")
-        raw = input("Enter choice (1-4): ").strip()
+        print(f"  3. Set target display FPS [{_target_fps}]")
+        print(f"  4. Detect every N captured frames [{_detect_every_n}]")
+        print(f"  5. Use 3 NPU cores (round-robin) [{multi_status}]")
+        print(f"  6. Back to main menu")
+        raw = input("Enter choice (1-6): ").strip()
         if raw == "1":
             _detection_enabled = not _detection_enabled
             print(f"Detection {'enabled' if _detection_enabled else 'disabled'}.")
@@ -380,6 +423,23 @@ def detection_settings_menu() -> None:
                 except ValueError:
                     print("Invalid number.")
         elif raw == "4":
+            val = input(f"Detect every N frames (1-10) [{_detect_every_n}]: ").strip()
+            if val:
+                try:
+                    v = int(val)
+                    if 1 <= v <= 10:
+                        _detect_every_n = v
+                        print(f"Detect-every-N set to {_detect_every_n}.")
+                    else:
+                        print("Value must be between 1 and 10.")
+                except ValueError:
+                    print("Invalid number.")
+        elif raw == "5":
+            _use_multi_core = not _use_multi_core
+            print(f"Multi-core NPU {'enabled' if _use_multi_core else 'disabled'}.")
+            print("  3-CORE: round-robin across NPU_CORE_0/1/2 (~3× detection rate)")
+            print("  1-CORE: single NPU_CORE_AUTO (lower power, ~10 Hz detect)")
+        elif raw == "6":
             break
         else:
             print("Invalid choice.")

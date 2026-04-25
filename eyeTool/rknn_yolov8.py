@@ -20,6 +20,7 @@ import os
 
 import cv2
 import numpy as np
+from scipy.special import softmax as scipy_softmax
 from rknnlite.api import RKNNLite
 
 # Detection constants
@@ -27,14 +28,15 @@ INPUT_SIZE = 640
 NMS_THRESH = 0.45
 DFL_LEN = 16  # 64 channels / 4 sides
 
-_RKNN: RKNNLite | None = None
+_RKNN_SINGLE: RKNNLite | None = None
+_RKNN_ALL_CORES: RKNNLite | None = None
 
 
 def _get_rknn(model_path: str = "yolov8n.rknn") -> RKNNLite:
-    """Singleton RKNNLite loader."""
-    global _RKNN
-    if _RKNN is not None:
-        return _RKNN
+    """Singleton RKNNLite loader (single core, AUTO)."""
+    global _RKNN_SINGLE
+    if _RKNN_SINGLE is not None:
+        return _RKNN_SINGLE
     if not os.path.isabs(model_path):
         # Resolve relative to this file so it works from any CWD
         here = os.path.dirname(os.path.abspath(__file__))
@@ -48,8 +50,35 @@ def _get_rknn(model_path: str = "yolov8n.rknn") -> RKNNLite:
     if r.init_runtime(core_mask=RKNNLite.NPU_CORE_AUTO) != 0:
         raise RuntimeError("init_runtime failed")
     print("RKNN runtime initialized (NPU_CORE_AUTO).")
-    _RKNN = r
-    return _RKNN
+    _RKNN_SINGLE = r
+    return _RKNN_SINGLE
+
+
+def _get_rknn_all_cores(model_path: str = "yolov8n.rknn") -> RKNNLite:
+    """Singleton RKNNLite loader using all three NPU cores simultaneously.
+
+    core_mask=7 = NPU_CORE_0|NPU_CORE_1|NPU_CORE_2 tells the RKNN runtime
+    to distribute one inference across all 3 cores, cutting per-inference
+    latency by ~3x compared to single-core AUTO.
+    """
+    global _RKNN_ALL_CORES
+    if _RKNN_ALL_CORES is not None:
+        return _RKNN_ALL_CORES
+    if not os.path.isabs(model_path):
+        here = os.path.dirname(os.path.abspath(__file__))
+        candidate = os.path.join(here, model_path)
+        if os.path.exists(candidate):
+            model_path = candidate
+    print(f"Loading RKNN model (all-core): {model_path}")
+    r = RKNNLite()
+    if r.load_rknn(model_path) != 0:
+        raise RuntimeError(f"load_rknn failed for {model_path}")
+    # mask 7 = NPU_CORE_0 | NPU_CORE_1 | NPU_CORE_2
+    if r.init_runtime(core_mask=7) != 0:
+        raise RuntimeError("init_runtime failed for all-core mode")
+    print("RKNN runtime initialized (NPU_CORE_0|1|2, all-core).")
+    _RKNN_ALL_CORES = r
+    return _RKNN_ALL_CORES
 
 
 def letterbox(im: np.ndarray, new_size: int = INPUT_SIZE,
@@ -77,12 +106,12 @@ def _softmax(x: np.ndarray, axis: int) -> np.ndarray:
 
 
 def _dfl(position: np.ndarray) -> np.ndarray:
-    """Distribution Focal Loss decode (numpy port)."""
+    """DFL decode: scipy softmax + weighted sum along axis 2."""
     n, c, h, w = position.shape
     p_num = 4
     mc = c // p_num
     y = position.reshape(n, p_num, mc, h, w)
-    y = _softmax(y, axis=2)
+    y = scipy_softmax(y, axis=2)
     acc = np.arange(mc, dtype=np.float32).reshape(1, 1, mc, 1, 1)
     return (y * acc).sum(axis=2)
 
@@ -108,27 +137,19 @@ def _sp_flatten(_in: np.ndarray) -> np.ndarray:
 
 
 def _nms_boxes(boxes: np.ndarray, scores: np.ndarray) -> np.ndarray:
-    """Plain numpy NMS. boxes: xyxy."""
-    x1 = boxes[:, 0]; y1 = boxes[:, 1]
-    x2 = boxes[:, 2]; y2 = boxes[:, 3]
-    areas = np.maximum(0.0, x2 - x1) * np.maximum(0.0, y2 - y1)
-    order = scores.argsort()[::-1]
-
-    keep = []
-    while order.size > 0:
-        i = order[0]
-        keep.append(i)
-        xx1 = np.maximum(x1[i], x1[order[1:]])
-        yy1 = np.maximum(y1[i], y1[order[1:]])
-        xx2 = np.minimum(x2[i], x2[order[1:]])
-        yy2 = np.minimum(y2[i], y2[order[1:]])
-        w = np.maximum(0.0, xx2 - xx1)
-        h = np.maximum(0.0, yy2 - yy1)
-        inter = w * h
-        ovr = inter / (areas[i] + areas[order[1:]] - inter + 1e-9)
-        inds = np.where(ovr <= NMS_THRESH)[0]
-        order = order[inds + 1]
-    return np.array(keep, dtype=np.int64)
+    """OpenCV NMS (C++ optimized). boxes: xyxy."""
+    if len(boxes) == 0:
+        return np.array([], dtype=np.int64)
+    # OpenCV NMSBoxes requires [x, y, w, h] format
+    xywh = boxes.astype(np.float32).copy()
+    xywh[:, 2] = boxes[:, 2] - boxes[:, 0]  # w = x2 - x1
+    xywh[:, 3] = boxes[:, 3] - boxes[:, 1]  # h = y2 - y1
+    # score_threshold=0.0: boxes already filtered upstream by conf_thres
+    indices = cv2.dnn.NMSBoxes(xywh.tolist(), scores.astype(np.float32).tolist(),
+                               0.0, float(NMS_THRESH))
+    if len(indices) == 0:
+        return np.array([], dtype=np.int64)
+    return np.array(indices, dtype=np.int64).flatten()
 
 
 def post_process(outputs: list[np.ndarray], conf_thres: float = 0.5
@@ -178,14 +199,17 @@ def post_process(outputs: list[np.ndarray], conf_thres: float = 0.5
     return np.concatenate(nboxes), np.concatenate(nclasses), np.concatenate(nscores)
 
 
-def infer(frame_bgr: np.ndarray, conf_thres: float = 0.5
+def infer(frame_bgr: np.ndarray, conf_thres: float = 0.5,
+          rknn: RKNNLite | None = None
           ) -> tuple[np.ndarray, np.ndarray, np.ndarray, float, tuple[int, int]]:
     """Run NPU inference on a BGR frame.
 
     Returns (boxes_xyxy_640, classes, scores, scale, (pad_w, pad_h)).
     Use scale and pad to map boxes back to the original frame.
+    If *rknn* is None, uses the singleton AUTO instance.
     """
-    rknn = _get_rknn()
+    if rknn is None:
+        rknn = _get_rknn()
     padded, scale, (pad_w, pad_h) = letterbox(frame_bgr, INPUT_SIZE)
     rgb = cv2.cvtColor(padded, cv2.COLOR_BGR2RGB)
     # RKNNLite expects a 4D NHWC tensor; add the batch dim.
@@ -199,3 +223,11 @@ def warmup() -> None:
     rknn = _get_rknn()
     dummy = np.zeros((1, INPUT_SIZE, INPUT_SIZE, 3), dtype=np.uint8)
     rknn.inference(inputs=[dummy])
+
+
+def warmup_all_cores() -> None:
+    """Warm up the all-core RKNN instance."""
+    rknn = _get_rknn_all_cores()
+    dummy = np.zeros((1, INPUT_SIZE, INPUT_SIZE, 3), dtype=np.uint8)
+    rknn.inference(inputs=[dummy])
+    print("  Warmed up all-core RKNN instance")

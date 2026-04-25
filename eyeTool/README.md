@@ -240,6 +240,39 @@ Ubuntu image at `/usr/lib/librknnrt.so`. If it's missing, install
 Postprocess (DFL decode + NMS) is in `rknn_yolov8.py` -- pure NumPy,
 no PyTorch dependency.
 
+#### Multi-core NPU (Phase 2)
+
+The RK3588 has **3 NPU cores**. By default, detection runs on a single
+core (`NPU_CORE_AUTO`). Enable **3-CORE mode** from the detection
+settings menu (option 5) to round-robin across all three cores:
+
+- **1-CORE** (default): ~10 Hz detection, lower power
+- **3-CORE**: ~30 Hz detection, higher power, ~3× throughput
+
+The pipeline stats line shows the actual detection rate:
+
+```
+Pipeline: capture=20.0 Hz  detect=10.5 Hz  display=19.8 Hz
+```
+
+Toggle 3-CORE mode if you need faster detection updates (e.g. tracking
+fast motion). The display loop runs independently at camera rate regardless
+of detection mode.
+
+#### Postprocess acceleration (Phase 3)
+
+Postprocessing (DFL decode + NMS) runs on CPU and can bottleneck detection
+rate when using multi-core NPU. The following optimizations are applied:
+
+- **OpenCV NMS**: Uses `cv2.dnn.NMSBoxes` (C++ implementation) instead of
+  pure NumPy NMS for faster suppression.
+- **Scipy softmax**: Uses `scipy.special.softmax` (C implementation) for
+  faster DFL distribution decoding.
+
+These reduce CPU postprocessing time, allowing multi-core NPU to reach
+higher detection throughput. If detection rate is still limited by CPU,
+consider reducing `detect every N` to skip frames and let the detector catch up.
+
 ### Display target
 
 eyeTool can direct `cv2.imshow` windows to any X display connected to the
