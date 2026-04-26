@@ -50,7 +50,8 @@ class FrameSource:
     releasing the capture.
     """
 
-    def __init__(self, cap: cv2.VideoCapture) -> None:
+    def __init__(self, cap: cv2.VideoCapture,
+                 preprocess=None) -> None:
         self._cap = cap
         self._lock = threading.Lock()
         self._latest: tuple[np.ndarray, float] | None = None
@@ -60,6 +61,11 @@ class FrameSource:
                                         daemon=True)
         self._frame_count = 0
         self._start_ts = 0.0
+        # Optional callable ``frame -> frame`` applied to every frame
+        # before it becomes visible to consumers (detector + compositor).
+        # Atomic reference swap is enough -- CPython attribute writes are
+        # atomic, and the worker reads it once per frame.
+        self.preprocess = preprocess
 
     # --- public ------------------------------------------------------
     def start(self) -> None:
@@ -93,6 +99,17 @@ class FrameSource:
                 # Avoid busy-spinning if the camera glitches for a moment.
                 time.sleep(0.005)
                 continue
+            # Per-camera preprocessing (brightness/contrast/saturation/
+            # gamma). The hook is hot-swappable: see Preprocess in
+            # preprocess.py and the live editor in main.preprocess_menu.
+            pre = self.preprocess
+            if pre is not None:
+                try:
+                    frame = pre(frame)
+                except Exception as e:  # noqa: BLE001
+                    print(f"[FrameSource] preprocess failed: {e}; "
+                          f"disabling for this stream")
+                    self.preprocess = None
             ts = time.monotonic()
             with self._lock:
                 self._latest = (frame, ts)
@@ -200,6 +217,102 @@ class Detector:
                 print(f"Detector overhead: avg {avg_overhead:.1f}ms per cycle")
 
 
+class MultiDetector:
+    """Round-robin NPU detector across all active stream slots.
+
+    The NPU is a single hardware resource, so running multiple detector
+    threads would only serialize on it and add contention. Instead, one
+    worker thread cycles through ``stream_manager.active_slots()`` in
+    order, running inference on the *latest* frame of each slot it visits.
+
+    The per-slot latest result is published into ``_by_slot`` and read
+    non-blocking via ``get_result(slot_id)``.
+    """
+
+    def __init__(self, stream_manager, conf_thres: float = 0.5,
+                 detect_every_n: int = 1, use_multi_core: bool = False) -> None:
+        self._mgr = stream_manager
+        self.conf_thres = conf_thres
+        self.detect_every_n = max(1, int(detect_every_n))
+        self.use_multi_core = use_multi_core
+        self._lock = threading.Lock()
+        self._by_slot: dict[int, DetectionResult] = {}
+        self._per_slot_frames_since: dict[int, int] = {}
+        self._per_slot_last_ts: dict[int, float] = {}
+        self._infer_count = 0
+        self._start_ts = 0.0
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, name="MultiDetector",
+                                        daemon=True)
+
+    # --- public ------------------------------------------------------
+    def start(self) -> None:
+        if self.use_multi_core:
+            rknn_warmup_all_cores()
+        else:
+            rknn_warmup()
+        self._start_ts = time.monotonic()
+        self._thread.start()
+
+    def stop(self, timeout: float = 1.0) -> None:
+        self._stop.set()
+        self._thread.join(timeout=timeout)
+
+    def get_result(self, slot_id: int) -> DetectionResult | None:
+        with self._lock:
+            return self._by_slot.get(slot_id)
+
+    def fps(self) -> float:
+        elapsed = time.monotonic() - self._start_ts
+        return self._infer_count / elapsed if elapsed > 0 else 0.0
+
+    # --- worker ------------------------------------------------------
+    def _run(self) -> None:
+        rknn_inst = _get_rknn_all_cores() if self.use_multi_core else None
+        cycle_idx = 0
+        while not self._stop.is_set():
+            active = self._mgr.active_slots()
+            if not active:
+                time.sleep(0.02)
+                continue
+
+            # Round-robin: pick next slot in the active list.
+            slot_id = active[cycle_idx % len(active)]
+            cycle_idx += 1
+
+            snap = self._mgr.get_frame(slot_id)
+            if snap is None:
+                time.sleep(0.001)
+                continue
+            frame, ts = snap
+            last_ts = self._per_slot_last_ts.get(slot_id)
+            if ts == last_ts:
+                # No new frame for this slot; move on quickly.
+                continue
+
+            frames_since = self._per_slot_frames_since.get(slot_id, 0) + 1
+            if frames_since < self.detect_every_n:
+                self._per_slot_frames_since[slot_id] = frames_since
+                self._per_slot_last_ts[slot_id] = ts
+                continue
+            self._per_slot_frames_since[slot_id] = 0
+            self._per_slot_last_ts[slot_id] = ts
+
+            h, w = frame.shape[:2]
+            try:
+                boxes, classes, scores, scale, pad = rknn_infer(
+                    frame, conf_thres=self.conf_thres, rknn=rknn_inst)
+            except Exception as e:  # noqa: BLE001
+                print(f"[multi-det] slot {slot_id} inference failed: {e}")
+                continue
+            result = DetectionResult(boxes=boxes, classes=classes,
+                                     scores=scores, scale=scale, pad=pad,
+                                     frame_ts=ts, frame_w=w, frame_h=h)
+            with self._lock:
+                self._by_slot[slot_id] = result
+            self._infer_count += 1
+
+
 # ------ overlay helpers ------------------------------------------------
 
 GREEN = (0, 255, 0)
@@ -247,3 +360,83 @@ def overlay_detections(frame: np.ndarray, det: DetectionResult | None,
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, colour, 1)
         count += 1
     return count
+
+
+RED = (0, 0, 255)
+
+
+def overlay_tile_detections(tile: np.ndarray, det: DetectionResult | None,
+                            tile_scale: float, tile_off_x: int, tile_off_y: int,
+                            now_ts: float,
+                            person_only: bool = True,
+                            stale_age_s: float = STALE_THRESHOLD_S,
+                            zone=None) -> tuple[int, int]:
+    """Draw *det* boxes on a compositor *tile* (post-letterbox).
+
+    Two transforms compose:
+        infer-space (bx) -> original-frame (ox) -> tile-space (tx)
+            ox = (bx - infer_pad) / infer_scale
+            tx = ox * tile_scale + tile_off_x
+
+    Color rules (per box):
+        * detection age > stale_age_s                -> YELLOW (stale)
+        * zone defined AND bbox **touches/overlaps** -> RED    (alarm)
+        * else                                       -> GREEN
+
+    The alarm condition is full bbox-vs-polygon intersection (corners-in,
+    vertices-in, or edge crossings) so a box turns red the moment it
+    grazes the polygon boundary -- not only once it's fully inside.
+
+    Returns ``(boxes_drawn, alarm_count)`` -- number of red boxes is the
+    second element.
+    """
+    if det is None or det.boxes.shape[0] == 0:
+        return 0, 0
+    age = now_ts - det.frame_ts
+    is_stale = age > stale_age_s
+    pad_w, pad_h = det.pad
+    inv_infer = 1.0 / det.scale if det.scale else 1.0
+    th, tw = tile.shape[:2]
+
+    drawn = 0
+    alarms = 0
+    for (bx1, by1, bx2, by2), score, cls in zip(det.boxes, det.scores, det.classes):
+        if person_only and int(cls) != PERSON_CLASS_ID:
+            continue
+        # infer -> original
+        ox1 = (bx1 - pad_w) * inv_infer
+        oy1 = (by1 - pad_h) * inv_infer
+        ox2 = (bx2 - pad_w) * inv_infer
+        oy2 = (by2 - pad_h) * inv_infer
+
+        # zone test in original-frame coords: bbox-vs-polygon intersection
+        # (touching the edge counts as alarm).
+        inside = False
+        if zone is not None and zone.is_valid:
+            inside = zone.intersects_bbox(ox1, oy1, ox2, oy2)
+
+        if is_stale:
+            colour = YELLOW
+        elif inside:
+            colour = RED
+            alarms += 1
+        else:
+            colour = GREEN
+
+        # original -> tile
+        tx1 = int(round(ox1 * tile_scale + tile_off_x))
+        ty1 = int(round(oy1 * tile_scale + tile_off_y))
+        tx2 = int(round(ox2 * tile_scale + tile_off_x))
+        ty2 = int(round(oy2 * tile_scale + tile_off_y))
+        # clip
+        tx1 = max(0, min(tw - 1, tx1)); tx2 = max(0, min(tw - 1, tx2))
+        ty1 = max(0, min(th - 1, ty1)); ty2 = max(0, min(th - 1, ty2))
+        if tx2 <= tx1 or ty2 <= ty1:
+            continue
+        thickness = 2 if (inside and not is_stale) else 1
+        cv2.rectangle(tile, (tx1, ty1), (tx2, ty2), colour, thickness)
+        label = f"{float(score):.2f}"
+        cv2.putText(tile, label, (tx1, max(0, ty1 - 3)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.35, colour, 1, cv2.LINE_AA)
+        drawn += 1
+    return drawn, alarms
