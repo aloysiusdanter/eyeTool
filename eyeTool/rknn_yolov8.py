@@ -17,6 +17,7 @@ Model spec (see reference_info/HANDOFF_TO_NANOPI.md):
 from __future__ import annotations
 
 import os
+import time
 
 import cv2
 import numpy as np
@@ -30,6 +31,12 @@ DFL_LEN = 16  # 64 channels / 4 sides
 
 _RKNN_SINGLE: RKNNLite | None = None
 _RKNN_ALL_CORES: RKNNLite | None = None
+
+# Timing stats for profiling
+_npu_time_sum = 0.0
+_postprocess_time_sum = 0.0
+_npu_count = 0
+_last_stats_ts = 0.0
 
 
 def _get_rknn(model_path: str = "yolov8n.rknn") -> RKNNLite:
@@ -159,6 +166,8 @@ def post_process(outputs: list[np.ndarray], conf_thres: float = 0.5
     Boxes are xyxy in 640-input space. Returns empty arrays if nothing
     survives filtering.
     """
+    global _postprocess_time_sum, _npu_count, _last_stats_ts
+    t0 = time.monotonic()
     branches = 3
     pair = len(outputs) // branches  # = 3 (dfl, class_conf, class_sum)
     boxes_l, classes_conf_l = [], []
@@ -194,9 +203,12 @@ def post_process(outputs: list[np.ndarray], conf_thres: float = 0.5
 
     if not nboxes:
         empty = np.empty((0,), dtype=np.float32)
+        _postprocess_time_sum += time.monotonic() - t0
         return np.empty((0, 4), dtype=np.float32), empty.astype(np.int64), empty
 
-    return np.concatenate(nboxes), np.concatenate(nclasses), np.concatenate(nscores)
+    result = np.concatenate(nboxes), np.concatenate(nclasses), np.concatenate(nscores)
+    _postprocess_time_sum += time.monotonic() - t0
+    return result
 
 
 def infer(frame_bgr: np.ndarray, conf_thres: float = 0.5,
@@ -208,13 +220,28 @@ def infer(frame_bgr: np.ndarray, conf_thres: float = 0.5,
     Use scale and pad to map boxes back to the original frame.
     If *rknn* is None, uses the singleton AUTO instance.
     """
+    global _npu_time_sum, _npu_count, _last_stats_ts
+
     if rknn is None:
         rknn = _get_rknn()
     padded, scale, (pad_w, pad_h) = letterbox(frame_bgr, INPUT_SIZE)
     rgb = cv2.cvtColor(padded, cv2.COLOR_BGR2RGB)
+
+    # Time NPU inference
+    t_npu = time.monotonic()
     # RKNNLite expects a 4D NHWC tensor; add the batch dim.
     outputs = rknn.inference(inputs=[np.expand_dims(rgb, axis=0)])
+    _npu_time_sum += time.monotonic() - t_npu
+
     boxes, classes, scores = post_process(outputs, conf_thres=conf_thres)
+
+    _npu_count += 1
+    # Print stats every 100 inferences
+    if _npu_count % 100 == 0:
+        avg_npu = _npu_time_sum / _npu_count * 1000  # ms
+        avg_post = _postprocess_time_sum / _npu_count * 1000  # ms
+        print(f"NPU profile: avg inference {avg_npu:.1f}ms  avg postprocess {avg_post:.1f}ms  total {avg_npu + avg_post:.1f}ms")
+
     return boxes, classes, scores, scale, (pad_w, pad_h)
 
 

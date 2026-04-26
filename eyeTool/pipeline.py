@@ -155,15 +155,19 @@ class Detector:
         frames_since_infer = 0
         # Resolve RKNN instance once (all-core or single-core AUTO)
         rknn_inst = _get_rknn_all_cores() if self.use_multi_core else None
+        # Timing for profiling
+        cycle_start = time.monotonic()
+        overhead_time_sum = 0.0
         while not self._stop.is_set():
-            # Wait for the producer so we don't spin while the camera is slow.
-            self._source.wait_new(timeout=0.2)
+            # Poll for the latest frame (no wait_new to avoid missing frames)
             snap = self._source.get_latest()
             if snap is None:
+                time.sleep(0.001)
                 continue
             frame, ts = snap
             if ts == last_seen_ts:
-                # Same frame we just ran on; wait for a fresh one.
+                # Same frame we just processed; skip and retry
+                time.sleep(0.001)
                 continue
             frames_since_infer += 1
             if frames_since_infer < self.detect_every_n:
@@ -172,6 +176,7 @@ class Detector:
             frames_since_infer = 0
             last_seen_ts = ts
 
+            t0 = time.monotonic()
             h, w = frame.shape[:2]
             boxes, classes, scores, scale, pad = rknn_infer(
                 frame, conf_thres=self.conf_thres, rknn=rknn_inst)
@@ -181,6 +186,18 @@ class Detector:
             with self._lock:
                 self._latest = result
             self._infer_count += 1
+            t1 = time.monotonic()
+
+            # Track overhead (total cycle time - inference time)
+            cycle_time = t1 - cycle_start
+            infer_time = t1 - t0
+            overhead_time_sum += (cycle_time - infer_time)
+            cycle_start = t1
+
+            # Print stats every 100 inferences
+            if self._infer_count % 100 == 0:
+                avg_overhead = overhead_time_sum / self._infer_count * 1000
+                print(f"Detector overhead: avg {avg_overhead:.1f}ms per cycle")
 
 
 # ------ overlay helpers ------------------------------------------------
