@@ -30,9 +30,9 @@ from enum import Enum
 import cv2
 import numpy as np
 
-from camera import open_camera
-from hotplug import CameraInfo, list_cameras
-from pipeline import FrameSource
+from core.camera import open_camera
+from core.hotplug import CameraInfo, list_cameras
+from detection.pipeline import FrameSource
 
 
 class SlotState(str, Enum):

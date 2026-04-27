@@ -26,8 +26,8 @@ import time
 from collections import deque
 from datetime import datetime
 
-from config import get_config
-from hotplug import list_cameras
+from core.config import get_config
+from core.hotplug import list_cameras
 
 REFRESH_HZ = 5
 EVENT_LOG_LEN = 12

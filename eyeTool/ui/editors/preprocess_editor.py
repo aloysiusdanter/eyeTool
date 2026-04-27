@@ -26,9 +26,9 @@ from __future__ import annotations
 import cv2
 import numpy as np
 
-from preprocess import (BRIGHTNESS_RANGE, CONTRAST_RANGE, GAMMA_RANGE,
+from preprocessing.preprocess import (BRIGHTNESS_RANGE, CONTRAST_RANGE, GAMMA_RANGE,
                         SATURATION_RANGE, Preprocess)
-from terminal_input import RawStdin, normalise_cv2_key
+from utils.terminal_input import RawStdin, normalise_cv2_key
 
 # UI constants
 _FONT = cv2.FONT_HERSHEY_SIMPLEX
@@ -54,7 +54,7 @@ def _detect_screen_size(default: tuple[int, int] = (800, 480)
                         ) -> tuple[int, int]:
     """Re-uses ``polygon_editor`` heuristic; imported lazily to keep this
     module independently importable in headless tests."""
-    from polygon_editor import _detect_screen_size as _f
+    from ui.editors.polygon_editor import _detect_screen_size as _f
     return _f(default)
 
 

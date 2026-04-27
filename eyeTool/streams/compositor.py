@@ -22,7 +22,7 @@ from __future__ import annotations
 import cv2
 import numpy as np
 
-from stream import SlotState, StreamSnapshot
+from streams.stream import SlotState, StreamSnapshot
 
 # BGR colors
 _BG = (24, 24, 24)

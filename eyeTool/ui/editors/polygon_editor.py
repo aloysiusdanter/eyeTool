@@ -38,7 +38,7 @@ import sys
 import cv2
 import numpy as np
 
-from terminal_input import RawStdin, normalise_cv2_key
+from utils.terminal_input import RawStdin, normalise_cv2_key
 
 
 def _detect_screen_size(default: tuple[int, int] = (800, 480)

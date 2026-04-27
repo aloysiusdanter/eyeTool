@@ -25,7 +25,7 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
-from rknn_yolov8 import (infer as rknn_infer, warmup as rknn_warmup,
+from detection.rknn_yolov8 import (infer as rknn_infer, warmup as rknn_warmup,
                           warmup_all_cores as rknn_warmup_all_cores,
                           _get_rknn_all_cores)
 
