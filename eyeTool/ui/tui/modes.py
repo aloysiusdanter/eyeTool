@@ -23,7 +23,8 @@ MAIN_MENU_OPTIONS = [
     ("8", "Probe camera"),
     ("9", "Select display target"),
     ("10", "Detection settings"),
-    ("11", "Exit"),
+    ("11", "Recording settings"),
+    ("12", "Exit"),
 ]
 
 
@@ -88,9 +89,75 @@ class MainMenuMode(Mode):
         """
         # Calculate starting position to center the menu
         menu_width = max(len(option[1]) for option in self.options)
-        start_x = x + (width - menu_width) // 2
+        start_x = x + (width - menu_width - 50) // 2  # Leave space for parameters on right
         start_y = y + 3
 
+        # Fetch parameters
+        try:
+            from ui.menus import get_config, detection_enabled, detection_confidence, detect_every_n, use_multi_core
+            from core.hotplug import list_cameras
+            cfg = get_config()
+            display_w = int(cfg.get("display.width", 800))
+            display_h = int(cfg.get("display.height", 480))
+            target_fps = int(cfg.get("display.target_fps", 30))
+            max_streams = int(cfg.get("streams.max_streams", 4))
+            cameras = list_cameras()
+            camera_count = len(cameras)
+            det_str = "ON" if detection_enabled else "OFF"
+            conf_str = f"{detection_confidence:.2f}"
+            every_str = f"{detect_every_n}"
+            npu_str = "3-CORE" if use_multi_core else "1-CORE"
+            rec_enabled = cfg.get("recording.enabled", True)
+            rec_str = "ON" if rec_enabled else "OFF"
+            rec_seg = cfg.get("recording.segment_duration_min", 2)
+            rec_codec = cfg.get("recording.codec", "mp4v")
+        except Exception:
+            display_w, display_h, target_fps, max_streams = 800, 480, 30, 4
+            camera_count = 0
+            det_str, conf_str, every_str, npu_str = "OFF", "0.50", "1", "1-CORE"
+            rec_str, rec_seg, rec_codec = "ON", 2, "mp4v"
+
+        # Render parameters on the right side
+        param_x = start_x + menu_width + 10
+        param_y = start_y
+        param_lines = [
+            "Multi-Camera Parameters",
+            "",
+            f"Display: {display_w}x{display_h}",
+            f"Target FPS: {target_fps}",
+            f"Max Streams: {max_streams}",
+            "",
+            f"Cameras: {camera_count}",
+            f"Detection: {det_str}",
+            f"Confidence: {conf_str}",
+            f"Every-N: {every_str}",
+            f"NPU: {npu_str}",
+            "",
+            "Recording",
+            f"Status: {rec_str}",
+            f"Segment: {rec_seg}min",
+            f"Codec: {rec_codec}",
+        ]
+
+        try:
+            # Draw separator
+            sep_x = start_x + menu_width + 5
+            for i in range(height - 5):
+                stdscr.addch(start_y + i, sep_x, curses.ACS_VLINE, curses.color_pair(5))
+
+            # Draw parameters
+            for i, line in enumerate(param_lines):
+                line_y = param_y + i
+                if line_y >= y + height - 2:
+                    break
+                if i == 0:  # Title
+                    stdscr.addstr(line_y, param_x, line, curses.color_pair(1) | curses.A_BOLD)
+                else:
+                    stdscr.addstr(line_y, param_x, line, curses.color_pair(5))
+        except curses.error:
+            pass
+
+        # Render menu options
         try:
             for i, (key, label) in enumerate(self.options):
                 line_y = start_y + i
@@ -144,7 +211,7 @@ class MainMenuMode(Mode):
         if selected == "1":
             return "feed"  # Live camera feed
         elif selected == "2":
-            return "multi_feed"  # Multi-camera feed
+            return "multi_feed"  # Multi-camera feed (shows parameters, then launches)
         elif selected == "3":
             return "zones_menu"  # Setup alarm zones
         elif selected == "4":
@@ -162,6 +229,8 @@ class MainMenuMode(Mode):
         elif selected == "10":
             return "detection_menu"  # Detection settings
         elif selected == "11":
+            return "recording_menu"  # Recording settings
+        elif selected == "12":
             return "quit"  # Exit
 
         return None

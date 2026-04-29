@@ -239,6 +239,7 @@ def run(frame: np.ndarray,
     status = ""
 
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+    cv2.moveWindow(window_name, 800, 0)  # Position on HDMI display
     # Initial fullscreen request -- we re-assert it every frame below
     # because some compositors (XWayland in particular) drop the flag
     # when the window first becomes mapped.

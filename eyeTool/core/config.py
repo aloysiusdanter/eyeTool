@@ -30,14 +30,14 @@ from typing import Any
 # missing. Never mutated at runtime. Edit this dict to ship new defaults.
 MANUFACTURER_DEFAULTS: dict[str, Any] = {
     "display": {
-        "width": 800,
-        "height": 480,
+        "width": 1280,
+        "height": 800,
         "target_fps": 30,
         "show_perf_panel": True,
         # Preferred X DISPLAY string (e.g. ":0" for the built-in LCD,
         # ":1" for the HDMI/secondary). Empty string = auto-detect on
         # startup. Overridden by the --display CLI flag if given.
-        "target": "",
+        "target": ":1",
     },
     "detection": {
         "enabled": True,
@@ -50,8 +50,8 @@ MANUFACTURER_DEFAULTS: dict[str, Any] = {
         "max_streams": 4,
         "grid": "2x2",
         "watchdog_stall_s": 2.0,
-        "min_capture_w": 320,
-        "min_capture_h": 240,
+        "min_capture_w": 1280,
+        "min_capture_h": 720,
     },
     "preprocessing": {
         "rotation_deg": 0.0,
@@ -63,6 +63,14 @@ MANUFACTURER_DEFAULTS: dict[str, Any] = {
         "color_outside": [0, 255, 0],  # BGR green
         "color_stale": [0, 255, 255],  # BGR yellow
         "stale_threshold_s": 0.2,
+    },
+    "recording": {
+        "enabled": True,
+        "save_dir": "/media/pi/6333-3864",
+        "fallback_dir": "~/Videos",
+        "segment_duration_min": 2,
+        "codec": "mpp_h264",  # Options: mpp_h264 (HW), mp4v, mjpg, avc1
+        "storage_threshold_percent": 20,  # Delete when disk is 20% full
     },
 }
 

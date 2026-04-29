@@ -166,6 +166,7 @@ def run(cap: "cv2.VideoCapture", initial: Preprocess | None = None,
     image_x1 = canvas_w - panel_w
 
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+    cv2.moveWindow(window_name, 800, 0)  # Position on HDMI display
     cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN,
                           cv2.WINDOW_FULLSCREEN)
 

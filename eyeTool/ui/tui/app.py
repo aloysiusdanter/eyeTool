@@ -26,6 +26,9 @@ _MODE_DISPATCH = {
     "config_menu":     ("configuration_menu",      False, False),
     "display_menu":    ("select_display_menu",     False, False),
     "detection_menu":  ("detection_settings_menu",  False, False),
+    "recording_menu":  ("recording_settings_menu",  False, False),
+    "record":          ("record_camera_feed",        True,  False),
+    "record_multi":    ("record_multi_camera_feed",  False, False),
     "monitor":         (None, False, False),  # special-cased
 }
 
@@ -131,6 +134,7 @@ class TUIApp:
         Args:
             mode_name: Mode identifier returned by the menu mode.
         """
+        print(f"[DEBUG] _dispatch_mode called with mode_name={mode_name}")
         self.event_log.add("INFO", f"Launching: {mode_name}")
         curses.endwin()
 
@@ -138,6 +142,13 @@ class TUIApp:
             if mode_name == "monitor":
                 from ui.monitor import run as run_monitor
                 run_monitor()
+            elif mode_name == "multi_feed":
+                # Multi-camera feed: return to menu after feed ends for monitoring system
+                import ui.menus as menus
+                menus.load_multi_camera_feed()
+                print("Multi-camera feed ended, returning to menu...")
+                # Keep self.running = True so we return to TUI menu instead of exiting
+                return
             elif mode_name in _MODE_DISPATCH:
                 import ui.menus as menus
                 func_name, needs_source, needs_output = _MODE_DISPATCH[mode_name]
@@ -152,6 +163,7 @@ class TUIApp:
             print(f"Error: {e}")
 
         # Re-initialise curses after the sub-process returned.
+        print(f"[DEBUG] Re-initializing curses...")
         self.stdscr = curses.initscr()
         self._init_curses(self.stdscr)
         self.event_log.add("INFO", f"Returned from: {mode_name}")

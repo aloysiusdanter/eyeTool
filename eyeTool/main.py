@@ -39,6 +39,9 @@ def main(argv: list[str] | None = None) -> int:
     elif args.mode == "probe":
         from ui.menus import probe_camera
         probe_camera(source)
+    elif args.mode == "record-multi":
+        from ui.menus import record_multi_camera_feed
+        record_multi_camera_feed()
     return 0
 
 

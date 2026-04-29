@@ -1,10 +1,10 @@
 {
   "display": {
-    "width": 800,
-    "height": 480,
+    "width": 1280,
+    "height": 800,
     "target_fps": 30,
     "show_perf_panel": true,
-    "target": ""
+    "target": ":1"
   },
   "detection": {
     "enabled": true,
@@ -17,8 +17,8 @@
     "max_streams": 4,
     "grid": "2x2",
     "watchdog_stall_s": 2.0,
-    "min_capture_w": 320,
-    "min_capture_h": 240
+    "min_capture_w": 1280,
+    "min_capture_h": 720
   },
   "preprocessing": {
     "rotation_deg": 0.0,
@@ -42,5 +42,13 @@
       255
     ],
     "stale_threshold_s": 0.2
+  },
+  "recording": {
+    "enabled": true,
+    "save_dir": "/media/pi/6333-3864",
+    "fallback_dir": "~/Videos",
+    "segment_duration_min": 2,
+    "codec": "mpp_h264",
+    "storage_threshold_percent": 20
   }
 }

@@ -108,17 +108,33 @@ def draw_top_panel(stdscr: curses.window, layout: Layout, event_log: EventLog) -
 
     # Read live detection state from ui.menus
     try:
-        from ui.menus import detection_enabled, detection_confidence
+        from ui.menus import detection_enabled, detection_confidence, detect_every_n, use_multi_core
         det_str = "ON" if detection_enabled else "OFF"
         conf_str = f"{detection_confidence:.2f}"
+        every_str = f"{detect_every_n}"
+        npu_str = "3-CORE" if use_multi_core else "1-CORE"
     except Exception:  # noqa: BLE001
-        det_str, conf_str = "OFF", "0.50"
+        det_str, conf_str, every_str, npu_str = "OFF", "0.50", "1", "1-CORE"
+
+    # Read display config
+    try:
+        from ui.menus import get_config
+        cfg = get_config()
+        display_w = int(cfg.get("display.width", 800))
+        display_h = int(cfg.get("display.height", 480))
+        target_fps = int(cfg.get("display.target_fps", 30))
+        max_streams = int(cfg.get("streams.max_streams", 4))
+        res_str = f"{display_w}x{display_h}"
+        fps_str = f"{target_fps}"
+    except Exception:  # noqa: BLE001
+        res_str, fps_str, max_streams = "800x480", "30", 4
 
     # Draw content (all wrapped for safety)
     try:
         stdscr.addstr(y + 1, 2, "eyeTool - Camera Status & Metrics", curses.color_pair(1))
         stdscr.addstr(y + 2, 2, camera_str, curses.color_pair(5))
-        stdscr.addstr(y + 3, 2, f"Detection: {det_str} | Conf: {conf_str} | FPS: 0", curses.color_pair(5))
+        stdscr.addstr(y + 3, 2, f"Detection: {det_str} | Conf: {conf_str} | Every-N: {every_str} | NPU: {npu_str}", curses.color_pair(5))
+        stdscr.addstr(y + 4, 2, f"Display: {res_str} | Target FPS: {fps_str} | Max Streams: {max_streams}", curses.color_pair(5))
     except curses.error:
         pass
 

@@ -84,18 +84,16 @@ def auto_set_display() -> str | None:
     """Choose a DISPLAY for this run.
 
     Precedence (highest first):
-      1. ``DISPLAY`` already exported by the parent shell -- never override.
-      2. ``display.target`` in ``user_settings.json`` / manufacturer
+      1. ``display.target`` in ``user_settings.json`` / manufacturer
          default -- the user's persistent preference.
-      3. First X11 socket found in ``/tmp/.X11-unix/`` -- typically ``:0``.
+      2. ``--display`` CLI flag (handled by main.py before calling this).
+      3. ``DISPLAY`` already exported by the parent shell.
+      4. First X11 socket found in ``/tmp/.X11-unix/`` -- typically ``:0``.
 
     Returns the display string actually set, or ``None`` if nothing
     suitable was found.
     """
-    if os.environ.get("DISPLAY"):
-        return None
-
-    # 2. saved preference
+    # 1. saved preference (highest priority)
     try:
         saved = (get_config().get("display.target", "") or "").strip()
     except Exception:  # noqa: BLE001 -- config init should never fail us here
@@ -108,6 +106,11 @@ def auto_set_display() -> str | None:
             return saved
         print(f"[main] saved display preference {saved!r} not present "
               f"on this system; available={available}; falling back")
+
+    # 2. environment DISPLAY (if saved preference not set or invalid)
+    if os.environ.get("DISPLAY"):
+        print(f"Using environment DISPLAY: {os.environ['DISPLAY']}")
+        return None
 
     # 3. first detected socket
     displays = detect_x_displays()

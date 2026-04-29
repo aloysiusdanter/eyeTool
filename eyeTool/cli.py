@@ -29,9 +29,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--mode",
         "-m",
-        choices=("menu", "feed", "capture", "probe"),
+        choices=("menu", "feed", "capture", "probe", "record-multi"),
         default="menu",
-        help="Run mode. 'menu' (default) launches the interactive menu.",
+        help="Run mode. 'menu' (default) launches the interactive menu. 'record-multi' auto-starts multi-camera recording.",
     )
     parser.add_argument(
         "--display",

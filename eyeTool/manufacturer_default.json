@@ -3,7 +3,8 @@
     "width": 800,
     "height": 480,
     "target_fps": 30,
-    "show_perf_panel": true
+    "show_perf_panel": true,
+    "target": ":1"
   },
   "detection": {
     "enabled": true,
