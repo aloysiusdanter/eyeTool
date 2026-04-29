@@ -147,11 +147,11 @@ def open_camera(source: int | str) -> cv2.VideoCapture | None:
     maximises ``width × height × fps`` across all reported formats.
     MIPI-CSI (``/dev/video-camera0``) is left untouched.
     """
-    cap = cv2.VideoCapture(source)
-    # Minimise kernel-side UVC buffering so cap.read() returns the freshest
-    # frame, not one queued up to ~100 ms ago. The V4L2 backend honours this
-    # on most USB UVC devices; harmless if ignored.
-    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    cap = cv2.VideoCapture(source, cv2.CAP_V4L2)
+    # Increase buffer size to allow camera to deliver frames faster
+    # Setting to 1 can cause camera to stall on some devices
+    # Buffer size 2 provides 33ms latency at 30fps while maintaining throughput
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 2)
     if not cap.isOpened():
         print(f"Error: Could not open camera '{source}'.")
         print("Hints:")
@@ -170,11 +170,18 @@ def open_camera(source: int | str) -> cv2.VideoCapture | None:
         best = get_best_resolution(device_path)
         if best is not None:
             w, h, fps, fmt = best
+            # Force 320x240 for maximum capture rate (matches display resolution)
+            w = 320
+            h = 240
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
-            cap.set(cv2.CAP_PROP_FPS, fps)
+            # Try to force 60fps explicitly
+            cap.set(cv2.CAP_PROP_FPS, 60.0)
             if fmt == "MJPG":
                 cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-            print(f"Auto-selected: {w}x{h} @ {fps:.0f} fps ({fmt}) for '{device_path}'")
+            # Disable auto-exposure for higher FPS
+            cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)  # Manual exposure mode
+            cap.set(cv2.CAP_PROP_EXPOSURE, 100)  # Fixed exposure value
+            print(f"Auto-selected: {w}x{h} @ 60 fps forced ({fmt}) for '{device_path}' (exposure disabled for max FPS)")
 
     return cap

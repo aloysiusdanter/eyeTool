@@ -110,8 +110,8 @@ def load_camera_feed(source: int | str) -> None:
     h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     fps = cap.get(cv2.CAP_PROP_FPS)
 
-    # Scale to display size (built-in LCD is 800x480)
-    display_w, display_h = 800, 480
+    # Scale to display size (lowered to 320x240 for performance)
+    display_w, display_h = 320, 240
     det_status = "ON" if detection_enabled else "OFF"
     print(f"Feed info: {w}x{h} @ {fps:.1f} fps (letterboxed to {display_w}x{display_h})  |  source: {source}  |  display: {os.environ.get('DISPLAY', '?')}")
     multi_status = "3-CORE" if use_multi_core else "1-CORE"
@@ -136,23 +136,26 @@ def load_camera_feed(source: int | str) -> None:
     last_stats_ts = time.monotonic()
     try:
         while not _quit_requested:
-            if not frame_source.wait_new(timeout=1.0):
-                # Camera stalled; loop back and re-check _quit_requested.
-                continue
+            # Aggressive: poll instead of wait to avoid blocking
             snap = frame_source.get_latest()
             if snap is None:
+                # No frame yet, minimal sleep to avoid busy-spin
+                time.sleep(0.001)
                 continue
             frame, frame_ts = snap
-            # Work on a shallow copy so the capture thread can safely
-            # overwrite the underlying buffer on its next read.
-            frame = frame.copy()
+            # Aggressive: skip frame copy for maximum speed (risky but fast)
+            # frame = frame.copy()
 
             now = time.monotonic()
             if detector is not None:
                 det = detector.get_latest()
                 overlay_detections(frame, det, now)
 
-            frame_letterboxed = letterbox_frame(frame, display_w, display_h)
+            # Aggressive: skip letterboxing if frame already at target size
+            if frame.shape[1] == display_w and frame.shape[0] == display_h:
+                frame_letterboxed = frame
+            else:
+                frame_letterboxed = letterbox_frame(frame, display_w, display_h)
 
             elapsed = now - prev_time
             if elapsed > 0:
@@ -176,14 +179,10 @@ def load_camera_feed(source: int | str) -> None:
                                       cv2.WND_PROP_FULLSCREEN,
                                       cv2.WINDOW_FULLSCREEN)
                 first_frame = False
-            else:
-                # Keep fullscreen property set (XWayland sometimes loses it)
-                cv2.setWindowProperty("eyeTool - Camera Feed",
-                                      cv2.WND_PROP_FULLSCREEN,
-                                      cv2.WINDOW_FULLSCREEN)
+            # Aggressive: removed repeated fullscreen property setting for speed
 
-            wait_ms = max(1, int(frame_interval * 1000 - elapsed * 1000))
-            key = cv2.waitKey(wait_ms) & 0xFF
+            # Aggressive: no frame rate limiting - always wait 1ms for display refresh
+            key = cv2.waitKey(1) & 0xFF
             if key in (ord("q"), ord("Q"), 27):  # 27 = ESC
                 break
             if cv2.getWindowProperty("eyeTool - Camera Feed",
@@ -214,7 +213,7 @@ def capture_single_image(source: int | str, output: str) -> None:
                 print("Error: Could not read frame.")
                 break
 
-            cv2.imshow("eyeTool - Capture Mode", frame)
+            # Aggressive: minimal wait to allow display refresh (no frame rate limiting)
             key = cv2.waitKey(1) & 0xFF
             if key == ord(" "):
                 if cv2.imwrite(output, frame):

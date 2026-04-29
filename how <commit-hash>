@@ -1,0 +1,61 @@
+[33mcommit 0b2d10c395f25f1d5db52e6f7cdcd3a4d77dffbd[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mmain[m[33m)[m
+Author: lkhoad <aloysiusdanter@gmail.com>
+Date:   Wed Apr 29 09:21:09 2026 +0800
+
+    Add HDMI display positioning and frame rate limiting for multi-camera feed
+
+[33mcommit a1d0361eaa0037f147e3a21ef11d3b4ba58ace40[m
+Author: lkhoad <aloysiusdanter@gmail.com>
+Date:   Mon Apr 27 10:24:40 2026 +0800
+
+    UI improvement
+
+[33mcommit 71a2578f3e8b614b1c881c3e703f8e96d4028fc4[m[33m ([m[1;31morigin/main[m[33m, [m[1;31morigin/HEAD[m[33m)[m
+Author: lkhoad <aloysiusdanter@gmail.com>
+Date:   Sun Apr 26 16:11:34 2026 +0800
+
+    Support Multi-display; UI update
+
+[33mcommit e233a6bff3b651a62ead73bf1688ff9b1fb36067[m[33m ([m[1;31morigin/camera-recognition[m[33m, [m[1;32mcamera-recognition[m[33m)[m
+Author: lkhoad <aloysiusdanter@gmail.com>
+Date:   Sun Apr 26 10:22:49 2026 +0800
+
+    improve recognition speed
+
+[33mcommit ec5724185ee51bdcfbf5a3dffaf175319561db0d[m
+Author: lkhoad <aloysiusdanter@gmail.com>
+Date:   Sat Apr 25 23:02:57 2026 +0800
+
+    rknn improvement
+
+[33mcommit daf568c011ae56ed9c28015cad75afeca3e22f2b[m
+Author: lkhoad <aloysiusdanter@gmail.com>
+Date:   Sat Apr 25 22:08:37 2026 +0800
+
+    RKNN YOLO BUILD
+
+[33mcommit 0fc738048c54afba061058036e36778622f55dcf[m[33m ([m[1;31morigin/camera-test[m[33m, [m[1;32mcamera-test[m[33m)[m
+Author: lkhoad <aloysiusdanter@gmail.com>
+Date:   Sat Apr 25 12:22:41 2026 +0800
+
+[33mcommit 3696a3409cd6a1f57bff0f259e0c9a5802c2ee90[m
+Author: lkhoad <aloysiusdanter@gmail.com>
+Date:   Sat Apr 25 11:55:13 2026 +0800
+
+[33mcommit 62e8fb9d351db165f6a8611310f16af7af8fa425[m
+Author: lkhoad <aloysiusdanter@gmail.com>
+Date:   Sat Apr 25 11:53:20 2026 +0800
+
+[33mcommit f358e2f9c9e64b40960807e41271780e932e97df[m
+Author: lkhoad <aloysiusdanter@gmail.com>
+Date:   Sat Apr 25 11:45:29 2026 +0800
+
+[33mcommit 9da8478db807d10f33b81113520ad61653f56277[m
+Author: lkhoad <aloysiusdanter@gmail.com>
+Date:   Sat Apr 25 11:14:14 2026 +0800
+
+[33mcommit a6edd3178501bf5558f63f2478cf425bb2438e75[m
+Author: home_desktop <aloysiusdanter@gmail.com>
+Date:   Tue Apr 21 23:59:29 2026 +0800
+
+    Initial commit: eyeTool Python camera application
