@@ -184,7 +184,7 @@ def load_camera_feed(source: int | str) -> None:
                                       cv2.WND_PROP_FULLSCREEN,
                                       cv2.WINDOW_FULLSCREEN)
 
-            wait_ms = max(1, int(frame_interval * 1000 - elapsed * 1000))
+            wait_ms = max(1, int(frame_interval * 1000 - elapsed * 1000)) if frame_interval > 0 else 1
             key = cv2.waitKey(wait_ms) & 0xFF
             if key in (ord("q"), ord("Q"), 27):  # 27 = ESC
                 break

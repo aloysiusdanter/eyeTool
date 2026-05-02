@@ -328,8 +328,7 @@ display"*:
    python main.py --mode feed --device /dev/video20
    ```
 
-The live feed window appears on the NanoPi's embedded display. Press `q` to
-quit.
+The live feed window appears on the NanoPi's embedded display. Press `q` or ESC on the OpenCV window, or Ctrl+C in the console to quit.
 
 > **Security note:** `xhost +local:` is convenient for development on a
 > trusted local network. Disable it again with `xhost -local:` when you are
