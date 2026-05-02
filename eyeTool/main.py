@@ -24,12 +24,8 @@ def main(argv: list[str] | None = None) -> int:
     source = resolve_camera_source(args.device)
 
     if args.mode == "menu":
-        try:
-            from ui.tui.app import run_tui
-            run_tui(source, args.output)
-        except ImportError:
-            from ui.menus import interactive_menu
-            interactive_menu(source, args.output)
+        from ui.menus import interactive_menu
+        interactive_menu(source, args.output)
     elif args.mode == "feed":
         from ui.menus import load_camera_feed
         load_camera_feed(source)
