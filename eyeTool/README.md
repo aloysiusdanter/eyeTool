@@ -206,8 +206,7 @@ python main.py --mode probe                     # grab 1 frame, no GUI
 
 1. **Live camera feed** - Displays real-time camera feed on the embedded
    display. Press `q` to quit.
-2. **Capture single image** - Capture and save an image. Press `SPACE` to
-   capture, `q` to quit.
+2. **Capture single image** - Capture and save an image. Press `SPACE` on the OpenCV window to capture, `q` or ESC on the OpenCV window, or Ctrl+C in the console to quit.
 3. **Probe camera (no GUI)** - Open the camera, grab one frame, and print
    its resolution and reported FPS. Useful over SSH without X.
 4. **Select display target** - Choose which X display `cv2.imshow` windows

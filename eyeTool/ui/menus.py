@@ -208,9 +208,16 @@ def capture_single_image(source: int | str, output: str) -> None:
     if cap is None:
         return
 
-    print(f"Press SPACE to capture image to '{output}', 'q' to quit.")
+    global _quit_requested
+    _quit_requested = False
+    signal.signal(signal.SIGINT, _signal_handler)
+    signal.signal(signal.SIGTERM, _signal_handler)
+    # Unblock signals in case curses blocked them
+    signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGINT, signal.SIGTERM})
+
+    print(f"Press SPACE on the OpenCV window to capture image to '{output}', 'q' or ESC to quit, or Ctrl+C in this console.")
     try:
-        while True:
+        while not _quit_requested:
             ret, frame = cap.read()
             if not ret:
                 print("Error: Could not read frame.")
@@ -224,7 +231,10 @@ def capture_single_image(source: int | str, output: str) -> None:
                 else:
                     print(f"Error: Failed to write image to '{output}'.")
                 break
-            if key == ord("q"):
+            if key in (ord("q"), ord("Q"), 27):  # 27 = ESC
+                break
+            if cv2.getWindowProperty("eyeTool - Capture Mode",
+                                     cv2.WND_PROP_VISIBLE) < 1:
                 break
     finally:
         cap.release()
