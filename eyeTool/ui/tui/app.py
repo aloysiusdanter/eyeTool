@@ -6,27 +6,29 @@ Provides the main curses loop, input handling, mode switching, and refresh sched
 from __future__ import annotations
 
 import curses
+import sys
 import time
+from io import StringIO
+from typing import TYPE_CHECKING
 
 from ui.tui.layout import Layout
 from ui.tui.modes import MainMenuMode
 from ui.tui.panels import EventLog, draw_bottom_panel, draw_main_panel_border, draw_top_panel
 
-REFRESH_MS = 400  # 400ms refresh rate (2.5 Hz)
+if TYPE_CHECKING:
+    from ui.tui.modes import Mode
+
+LOOP_TIMEOUT_MS = 15  # 15ms for real-time responsiveness (~67 FPS)
+DATA_REFRESH_MS = 400  # 400ms for data panel refresh (2.5 Hz)
 
 # Map mode names returned by MainMenuMode to functions in ui.menus.
 # Each value is (function_name, needs_source, needs_output).
-_MODE_DISPATCH = {
+# Only used for camera-based modes that need special handling.
+_CAMERA_MODE_DISPATCH = {
     "feed":            ("load_camera_feed",       True,  False),
     "multi_feed":      ("load_multi_camera_feed",  False, False),
     "capture":         ("capture_single_image",    True,  True),
     "probe":           ("probe_camera",            True,  False),
-    "zones_menu":      ("setup_zones_menu",        False, False),
-    "preprocess_menu": ("preprocess_settings_menu", False, False),
-    "config_menu":     ("configuration_menu",      False, False),
-    "display_menu":    ("select_display_menu",     False, False),
-    "detection_menu":  ("detection_settings_menu",  False, False),
-    "recording_menu":  ("recording_settings_menu",  False, False),
     "record":          ("record_camera_feed",        True,  False),
     "record_multi":    ("record_multi_camera_feed",  False, False),
     "monitor":         (None, False, False),  # special-cased
@@ -50,7 +52,10 @@ class TUIApp:
         self.current_mode = MainMenuMode()
         self.stdscr: curses.window | None = None
         self.event_log = EventLog()
+        self.mode_stack: list[Mode] = []
         self.event_log.add("INFO", "TUI initialized")
+        self._last_data_refresh = 0
+        self._setup_stdout_hijacking()
 
     def run(self, stdscr: curses.window) -> None:
         """Run the TUI application.
@@ -78,13 +83,20 @@ class TUIApp:
 
         while self.running:
             self._handle_resize()
-            self._draw()
             self._handle_input()
+            # Decouple data refresh from input loop
+            current_time = time.monotonic() * 1000
+            if current_time - self._last_data_refresh >= DATA_REFRESH_MS:
+                self._draw()
+                self._last_data_refresh = current_time
+            # Always call cv2.waitKey(1) if OpenCV windows are active
+            self._process_opencv_windows()
 
         curses.curs_set(1)
         curses.echo()
         curses.nocbreak()
         stdscr.nodelay(False)
+        self._restore_stdout()
 
     @staticmethod
     def _init_curses(stdscr: curses.window) -> None:
@@ -93,7 +105,7 @@ class TUIApp:
         curses.noecho()
         curses.cbreak()
         stdscr.nodelay(True)
-        stdscr.timeout(REFRESH_MS)
+        stdscr.timeout(LOOP_TIMEOUT_MS)
         curses.start_color()
         curses.init_pair(1, curses.COLOR_GREEN, curses.COLOR_BLACK)
         curses.init_pair(2, curses.COLOR_RED, curses.COLOR_BLACK)
@@ -110,63 +122,155 @@ class TUIApp:
             self.layout.resize(width, height)
 
     def _handle_input(self) -> None:
-        """Handle keyboard input."""
+        """Handle keyboard input and mode dispatch."""
         if self.stdscr is None:
             return
+
+        # Check if the current mode auto-finished (e.g. background camera thread done)
+        if hasattr(self.current_mode, "camera_finished") and self.current_mode.camera_finished:
+            self._pop_mode()
+            return
+
         try:
             key = self.stdscr.getch()
         except curses.error:
             return
-        if key == curses.ERR:
-            return
-        if key in (ord("q"), ord("Q"), 27):
-            self.running = False
-            return
-        new_mode = self.current_mode.handle_input(key)
-        if new_mode == "quit":
-            self.running = False
-        elif new_mode is not None:
-            self._dispatch_mode(new_mode)
 
-    def _dispatch_mode(self, mode_name: str) -> None:
-        """Exit curses, run the selected feature, then resume curses.
+        if key != curses.ERR:
+            new_mode = self.current_mode.handle_input(key)
+
+            if new_mode == "quit":
+                self.running = False
+            elif new_mode == "back":
+                self._pop_mode()
+            elif isinstance(new_mode, Mode):
+                self._push_mode(new_mode)
+            elif new_mode is not None:
+                # String name for a camera mode
+                self._dispatch_camera_mode(new_mode)
+
+    def _push_mode(self, new_mode: Mode) -> None:
+        """Push a new mode onto the mode stack.
 
         Args:
-            mode_name: Mode identifier returned by the menu mode.
+            new_mode: The new mode to switch to.
         """
-        print(f"[DEBUG] _dispatch_mode called with mode_name={mode_name}")
-        self.event_log.add("INFO", f"Launching: {mode_name}")
-        curses.endwin()
+        self.mode_stack.append(self.current_mode)
+        self.current_mode = new_mode
+        self.event_log.add("INFO", f"Entered mode: {new_mode.name}")
+        self._draw()  # Immediate redraw on mode switch
+
+    def _pop_mode(self) -> None:
+        """Pop the current mode and return to the previous mode."""
+        if self.mode_stack:
+            previous_mode = self.mode_stack.pop()
+            self.current_mode = previous_mode
+            self.event_log.add("INFO", f"Returned to mode: {previous_mode.name}")
+            self._draw()  # Immediate redraw on mode switch
+        else:
+            # No previous mode, return to main menu
+            self.current_mode = MainMenuMode()
+            self.event_log.add("INFO", "Returned to main menu")
+            self._draw()
+
+    def _dispatch_camera_mode(self, mode_name: str) -> None:
+        """Run camera-based mode alongside TUI (no curses teardown).
+
+        Args:
+            mode_name: Mode identifier for camera mode.
+        """
+        self.event_log.add("INFO", f"Launching camera mode: {mode_name}")
 
         try:
             if mode_name == "monitor":
-                from ui.monitor import run as run_monitor
-                run_monitor()
-            elif mode_name == "multi_feed":
-                # Multi-camera feed: return to menu after feed ends for monitoring system
-                import ui.menus as menus
-                menus.load_multi_camera_feed()
-                print("Multi-camera feed ended, returning to menu...")
-                # Keep self.running = True so we return to TUI menu instead of exiting
+                # Monitor mode requires curses teardown, but it's deprecated in the new TUI
+                self.event_log.add("WARN", "Monitor mode is deprecated in unified TUI")
                 return
-            elif mode_name in _MODE_DISPATCH:
+
+            if mode_name in _CAMERA_MODE_DISPATCH:
                 import ui.menus as menus
-                func_name, needs_source, needs_output = _MODE_DISPATCH[mode_name]
+                import threading
+                
+                func_name, needs_source, needs_output = _CAMERA_MODE_DISPATCH[mode_name]
                 func = getattr(menus, func_name)
                 args: list = []
                 if needs_source:
                     args.append(self.source)
                 if needs_output:
                     args.append(self.output)
-                func(*args)
-        except Exception as e:  # noqa: BLE001
-            print(f"Error: {e}")
+                
+                # Switch to a status mode while camera is running
+                from ui.tui.modes import StatusMode
+                status_mode = StatusMode(
+                    f"Camera Mode: {mode_name}\n\nPress 'q' in console or OpenCV window to exit."
+                )
+                self._push_mode(status_mode)
+                self._draw()  # Draw immediately to show status
+                
+                # Run camera mode in a separate thread so it doesn't block the TUI loop
+                # The camera thread will manage its own cv2.namedWindow and cv2.waitKey
+                def camera_thread_worker():
+                    try:
+                        func(*args)
+                    except Exception as e:
+                        self.event_log.add("ERROR", f"Camera mode error: {e}")
+                    finally:
+                        self.event_log.add("INFO", f"Returned from camera mode: {mode_name}")
+                        # Auto-pop the status mode if we're still on it
+                        if self.current_mode is status_mode:
+                            # We can't pop directly from here safely if curses is drawing, 
+                            # but we can set a flag for the main loop
+                            status_mode.camera_finished = True
 
-        # Re-initialise curses after the sub-process returned.
-        print(f"[DEBUG] Re-initializing curses...")
-        self.stdscr = curses.initscr()
-        self._init_curses(self.stdscr)
-        self.event_log.add("INFO", f"Returned from: {mode_name}")
+                camera_thread = threading.Thread(target=camera_thread_worker, daemon=True)
+                camera_thread.start()
+                
+        except Exception as e:  # noqa: BLE001
+            self.event_log.add("ERROR", f"Camera mode launch error: {e}")
+
+    def _process_opencv_windows(self) -> None:
+        """Process OpenCV window events (cv2.waitKey(1)) to keep windows responsive.
+
+        This is called in the main loop to allow OpenCV windows to render
+        alongside the TUI without blocking.
+        """
+        try:
+            import cv2
+            cv2.waitKey(1)
+        except Exception:  # noqa: BLE001
+            # OpenCV not available or no windows open
+            pass
+
+    def _setup_stdout_hijacking(self) -> None:
+        """Redirect stdout/stderr to EventLog to prevent screen corruption.
+
+        This catches print() calls from core modules and routes them to
+        the EventLog buffer instead of corrupting the curses display.
+        """
+        class StdoutRedirector:
+            def __init__(self, event_log: EventLog):
+                self.event_log = event_log
+                self.original_stdout = sys.stdout
+                self.original_stderr = sys.stderr
+
+            def write(self, text: str) -> None:
+                if text.strip():  # Only log non-empty lines
+                    self.event_log.add("STDOUT", text.strip())
+                # Also write to original for debugging (can be removed later)
+                # self.original_stdout.write(text)
+
+            def flush(self) -> None:
+                pass
+
+        self._stdout_redirector = StdoutRedirector(self.event_log)
+        sys.stdout = self._stdout_redirector
+        sys.stderr = self._stdout_redirector
+
+    def _restore_stdout(self) -> None:
+        """Restore original stdout/stderr on exit."""
+        if hasattr(self, '_stdout_redirector'):
+            sys.stdout = self._stdout_redirector.original_stdout
+            sys.stderr = self._stdout_redirector.original_stderr
 
     def _draw(self) -> None:
         """Draw all panels."""

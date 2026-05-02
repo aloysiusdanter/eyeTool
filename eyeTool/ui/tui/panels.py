@@ -211,6 +211,6 @@ def draw_main_panel_border(stdscr: curses.window, layout: Layout, title: str) ->
     _draw_border(stdscr, y, 0, width, height)
 
     try:
-        stdscr.addstr(y + 1, 2, title, curses.color_pair(4))
+        stdscr.addstr(y, 2, f" {title} ", curses.color_pair(4))
     except curses.error:
         pass

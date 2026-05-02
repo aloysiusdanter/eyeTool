@@ -10,6 +10,7 @@ MIN_TERMINAL_HEIGHT = 24
 
 TOP_PANEL_HEIGHT = 5
 BOTTOM_PANEL_HEIGHT = 5
+INPUT_ROW_HEIGHT = 1
 
 
 class Layout:
@@ -57,6 +58,10 @@ class Layout:
     def bottom_panel_y(self) -> int:
         """Return Y position of the bottom panel (0-based)."""
         return self.top_panel_height() + self.main_panel_height()
+
+    def input_row_y(self) -> int:
+        """Return Y position of the input row (0-based)."""
+        return self.top_panel_height() + self.data_area_height()
 
     def resize(self, width: int, height: int) -> None:
         """Update layout after terminal resize.
