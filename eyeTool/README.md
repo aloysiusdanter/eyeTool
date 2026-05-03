@@ -1,61 +1,41 @@
-# eyeTool
+# eyeTool Deployment Guide
 
-A Python application for camera image loading and processing using OpenCV,
-targeted at the **FriendlyElec NanoPi M6** single-board computer.
+eyeTool is a Python/OpenCV camera monitoring and recording application for the FriendlyElec NanoPi M6. It supports single-camera viewing, multi-camera grid display, RK3588 NPU person detection, alarm-zone setup, preprocessing controls, per-slot recording, display selection, configuration persistence, and external-library logging.
 
-## Features
+## Target Runtime
 
-- Live camera feed display with letterboxed fullscreen output on the
-  built-in 800x480 LCD
-- Real-time **human detection** with YOLOv8n on the RK3588 NPU (~17 FPS
-  end-to-end on 1280x720 capture; see [NPU detection](#npu-detection))
-- Single image capture
-- Auto-detected XWayland display target with a runtime selector
-- Interactive menu and CLI flags
+- **Board:** FriendlyElec NanoPi M6 / RK3588S, arm64
+- **OS:** FriendlyElec Ubuntu 24.04 Desktop
+- **Python:** 3.12+
+- **Display:** local X11/XWayland display, commonly `:0` or `:1`
+- **Camera:** USB UVC camera or MIPI-CSI camera exposed through `/dev/video*`
+- **NPU runtime:** RKNNLite with `librknnrt.so`
 
-## Target Hardware
+## Repository Layout
 
-This project is developed for and tested on the FriendlyElec NanoPi M6.
+```text
+eyeTool/
+├── main.py                         # Application entry point
+├── cli.py                          # CLI argument parser
+├── requirements.txt                # Python runtime dependencies
+├── core/                           # Camera, config, display, zones, hotplug
+├── detection/                      # RKNN YOLOv8 inference and pipeline
+├── preprocessing/                  # Per-stream preprocessing model
+├── streams/                        # Multi-camera stream management/compositor
+├── ui/                             # Runtime menus, monitor, TUI modules
+├── utils/                          # External logging and terminal helpers
+└── logs/                           # Runtime external-library logs
+```
 
-- **Board:** FriendlyElec NanoPi M6 (Rockchip RK3588S, 8-core Cortex-A76/A55,
-  Mali-G610 MP4 GPU, 6 TOPS NPU, LPDDR5 RAM)
-- **Storage:** microSD Class 10, 8 GB or larger (SDHC), or eMMC module
-- **Power:** USB-C PD adapter, 10 W or greater (6-20 V input)
-- **Display:** the embedded display attached to the NanoPi M6 is used for both
-  development and runtime. OpenCV debug windows (`cv2.imshow`) will pop up on
-  this display; no headless mode is required.
-- **Camera:** a camera is *required*. Either option works:
-  - a **USB UVC webcam** plugged into a USB-A port (e.g. Logitech C920), or
-  - a **MIPI-CSI camera** (e.g. FriendlyElec CAM415) on the 4-lane MIPI-CSI
-    connector.
-- **Input:** USB keyboard/mouse, or an SSH session with display forwarding
-  (see [Remote development over SSH](#remote-development-over-ssh) below).
+## Fresh Deployment
 
-> Camera choice is still TBD. Both USB UVC and MIPI-CSI cameras expose
-> `/dev/video*` nodes on the FriendlyElec images, so the Python code does not
-> need to change based on the choice; only the device index may differ.
-
-## Operating System
-
-The officially supported and recommended image is the one pre-installed on the
-board from FriendlyElec:
-
-- **FriendlyElec Ubuntu 24.04 Desktop (arm64)** for RK3588S
-- Default accounts: `pi` / `pi`, and `root` / `fa`
-- Architecture: `aarch64` (arm64)
-
-Other FriendlyElec images (Debian 11 Desktop, FriendlyCore, Armbian) are not
-targeted by this project.
-
-## System Prerequisites
-
-Install the required OS packages on a fresh FriendlyElec Ubuntu 24.04 image:
+### 1. Install OS packages
 
 ```bash
 sudo apt update
 sudo apt install -y \
     python3 python3-pip python3-venv \
-    v4l-utils \
+    v4l-utils xauth \
     libgl1 libglib2.0-0 \
     libsm6 libxext6 libxrender1 \
     gstreamer1.0-tools \
@@ -63,292 +43,173 @@ sudo apt install -y \
     gstreamer1.0-plugins-good
 ```
 
-- `v4l-utils` provides `v4l2-ctl` to list and inspect cameras.
-- `libgl1` and the `libx*` packages are needed by the `opencv-python` wheel to
-  open GUI windows via `cv2.imshow`.
-- GStreamer packages enable the camera pipelines documented in the NanoPi M6
-  wiki (useful for debugging the camera outside of Python).
-
-Add your runtime user to the `video` group so `/dev/video*` is accessible
-without root:
+Add the runtime user to the `video` group:
 
 ```bash
 sudo usermod -aG video $USER
 ```
 
-Log out and back in (or reboot) for the group change to take effect.
+Log out and back in, or reboot, before running eyeTool.
 
-### Python runtime
+### 2. Create the Python environment
 
-FriendlyElec Ubuntu 24.04 ships with **Python 3.12** as the system interpreter,
-which meets this project's minimum requirement.
-
-If you want a newer interpreter (**Python 3.14** is preferred when available),
-install it alongside the system Python. On Ubuntu 24.04 arm64 use either the
-deadsnakes PPA or `pyenv`:
+Run these commands from this directory:
 
 ```bash
-# Option A: deadsnakes PPA
-sudo add-apt-repository ppa:deadsnakes/ppa
-sudo apt update
-sudo apt install -y python3.14 python3.14-venv python3.14-dev
-
-# Option B: pyenv (build from source)
-curl -fsSL https://pyenv.run | bash
-# then follow the printed shell-init instructions, and:
-pyenv install 3.14
-pyenv local  3.14
+python3 -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip
+pip install -r requirements.txt
 ```
 
-Do not replace the system `python3`; only use the new interpreter to create a
-virtual environment for this project.
-
-## Camera Setup and Verification
-
-After connecting the camera (USB or MIPI-CSI), verify it is detected before
-running `main.py`:
+If `opencv-python` cannot install an arm64 wheel, use the system package fallback:
 
 ```bash
-# List all video capture devices
-v4l2-ctl --list-devices
+deactivate
+sudo apt install -y python3-opencv
+python3 -m venv --system-site-packages .venv
+source .venv/bin/activate
+pip install numpy scipy 'rknn-toolkit-lite2>=2.3.0'
+```
 
-# Inspect the formats/resolutions of a specific device
+### 3. Install the RKNN model
+
+Detection expects `yolov8n.rknn` to be available relative to `detection/rknn_yolov8.py`. The default lookup checks:
+
+```text
+eyeTool/detection/yolov8n.rknn
+```
+
+The model is not committed to the repository. Build it offline and copy it to the target device:
+
+```bash
+scp yolov8n.rknn pi@<nanopi-ip>:~/eyeTool/eyeTool/detection/yolov8n.rknn
+```
+
+If detection fails to initialize, confirm that `librknnrt.so` is installed by the FriendlyElec RKNN runtime package.
+
+### 4. Verify cameras
+
+```bash
+v4l2-ctl --list-devices
 v4l2-ctl -d /dev/video0 --list-formats-ext
 ```
 
-If multiple `/dev/video*` nodes appear (common on RK3588S because the ISP
-registers several nodes), adjust the index passed to `cv2.VideoCapture(...)`
-in `main.py` to the one that corresponds to your actual camera.
+On NanoPi M6 images, MIPI/ISP nodes may occupy many `/dev/video*` paths. A USB UVC webcam commonly appears at a higher index such as `/dev/video20`. eyeTool defaults to `/dev/video-camera0` only when it exists and reports discrete capture formats, otherwise it tries to auto-detect a USB camera and then falls back to OpenCV index `0`.
 
-> **USB camera tip:** On a fresh FriendlyElec image the MIPI-CSI ISP pipeline
-> already occupies `/dev/video0` through `/dev/video19`. A USB UVC webcam
-> typically appears as `/dev/video20` (or `/dev/video21`). Use
-> `v4l2-ctl --list-devices` to find the exact node labelled with your webcam's
-> vendor name, then pass it to eyeTool with `--device /dev/video20`.
+## Running eyeTool
 
-> **Auto-resolution:** When eyeTool opens a USB camera, it automatically calls
-> `v4l2-ctl --list-formats-ext` to enumerate every supported
-> `(width × height × fps)` combination and selects the one with the highest
-> score. For example, the DECXIN webcam chooses **MJPEG 1280×720 @ 60 fps**
-> over YUYV 1280×720 @ 10 fps. MIPI-CSI (`/dev/video-camera0`) is left at its
-> driver default. If `v4l2-ctl` is unavailable the camera opens with OpenCV
-> defaults (graceful fallback).
-
-Optional GStreamer preview (USB UVC example), useful to confirm the camera
-works independently of OpenCV. Replace `/dev/video20` with your actual node:
+### Interactive runtime menu
 
 ```bash
-gst-launch-1.0 v4l2src device=/dev/video20 ! \
-    image/jpeg,width=1280,height=720,framerate=30/1 ! \
-    jpegdec ! videoconvert ! glimagesink
-```
-
-## Installation
-
-1. Navigate to the project directory:
-   ```bash
-   cd eyeTool
-   ```
-
-2. Create and activate a virtual environment (use `python3.14` instead of
-   `python3` if you installed Python 3.14 as described above):
-   ```bash
-   python3 -m venv .venv
-   source .venv/bin/activate
-   ```
-
-3. Install the required Python dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-   If `pip` cannot find an arm64 wheel for `opencv-python` and tries to build
-   from source, fall back to the Debian package instead:
-   ```bash
-   deactivate
-   sudo apt install -y python3-opencv
-   # and re-create the venv with --system-site-packages if needed:
-   python3 -m venv --system-site-packages .venv
-   source .venv/bin/activate
-   pip install numpy==1.26.4
-   ```
-
-## Usage
-
-Make sure the embedded display is active, then run:
-
-```bash
+source .venv/bin/activate
 python main.py
 ```
 
-> If you are connected over SSH, see [Remote development over SSH](#remote-development-over-ssh)
-> below before running GUI modes (`feed` or `capture`).
+The active menu options are:
 
-By default `main.py` uses the NanoPi M6 MIPI-CSI symlink
-`/dev/video-camera0` if present, otherwise falls back to OpenCV index `0`.
-Override with `--device`:
+1. Live camera feed (single)
+2. Multi-camera feed (with recording)
+3. Setup alarm zones
+4. Image preprocessing
+5. Monitoring TUI
+6. Configuration (save/restore default)
+7. Capture single image
+8. Probe camera (no GUI)
+9. Select display target
+10. Detection settings
+11. Recording settings
+12. Exit
 
-```bash
-python main.py --device /dev/video-camera0      # MIPI-CSI (explicit)
-python main.py --device 0                       # OpenCV index 0
-python main.py --device /dev/video1             # specific node
-```
-
-Run modes (skip the interactive menu):
-
-```bash
-python main.py --mode feed                      # live feed window
-python main.py --mode capture --output shot.jpg # capture one frame
-python main.py --mode probe                     # grab 1 frame, no GUI
-```
-
-### Menu Options
-
-1. **Live camera feed** - Displays real-time camera feed on the embedded
-   display. Press `q` to quit.
-2. **Capture single image** - Capture and save an image. Press `SPACE` on the OpenCV window to capture, `q` or ESC on the OpenCV window, or Ctrl+C in the console to quit.
-3. **Probe camera (no GUI)** - Open the camera, grab one frame, and print
-   its resolution and reported FPS. Useful over SSH without X.
-4. **Select display target** - Choose which X display `cv2.imshow` windows
-   are sent to. Lists all detected displays; `:0` is the built-in LCD,
-   `:1` is the HDMI output (when connected).
-5. **Detection settings** - Toggle person detection on/off, set the
-   confidence threshold, and pick a target FPS for the feed loop.
-6. **Exit** - Close the application.
-
-### NPU detection
-
-Human detection runs on the **RK3588 NPU** via `rknn-toolkit-lite2`,
-not on the CPU. The model file `yolov8n.rknn` (int8, 640x640 input,
-9-output airockchip head) is **not committed** -- it is built offline
-from the airockchip ONNX. To refresh it:
-
-1. Build the `.rknn` on a PC following
-   `reference_info/HANDOFF_TO_NANOPI.md` and
-   `reference_info/CONVERSION_PLAYBOOK.md`.
-2. Copy the artefact next to `main.py`:
-
-   ```bash
-   scp yolov8n.rknn pi@<nanopi-ip>:~/eyeTool/eyeTool/yolov8n.rknn
-   ```
-
-The runtime library `librknnrt.so` is shipped in the FriendlyElec
-Ubuntu image at `/usr/lib/librknnrt.so`. If it's missing, install
-`rknpu2-runtime` from FriendlyElec or the airockchip release.
-
-Postprocess (DFL decode + NMS) is in `rknn_yolov8.py` -- pure NumPy,
-no PyTorch dependency.
-
-#### Multi-core NPU (Phase 2)
-
-The RK3588 has **3 NPU cores**. By default, detection runs on a single
-core (`NPU_CORE_AUTO`). Enable **3-CORE mode** from the detection
-settings menu (option 5) to round-robin across all three cores:
-
-- **1-CORE** (default): ~10 Hz detection, lower power
-- **3-CORE**: ~30 Hz detection, higher power, ~3× throughput
-
-The pipeline stats line shows the actual detection rate:
-
-```
-Pipeline: capture=20.0 Hz  detect=10.5 Hz  display=19.8 Hz
-```
-
-Toggle 3-CORE mode if you need faster detection updates (e.g. tracking
-fast motion). The display loop runs independently at camera rate regardless
-of detection mode.
-
-#### Postprocess acceleration (Phase 3)
-
-Postprocessing (DFL decode + NMS) runs on CPU and can bottleneck detection
-rate when using multi-core NPU. The following optimizations are applied:
-
-- **OpenCV NMS**: Uses `cv2.dnn.NMSBoxes` (C++ implementation) instead of
-  pure NumPy NMS for faster suppression.
-- **Scipy softmax**: Uses `scipy.special.softmax` (C implementation) for
-  faster DFL distribution decoding.
-
-These reduce CPU postprocessing time, allowing multi-core NPU to reach
-higher detection throughput. If detection rate is still limited by CPU,
-consider reducing `detect every N` to skip frames and let the detector catch up.
-
-### Display target
-
-eyeTool can direct `cv2.imshow` windows to any X display connected to the
-NanoPi M6. The NanoPi M6 runs **GNOME on Wayland**; XWayland provides X11
-compatibility sockets that Qt5 (bundled with the `opencv-python` wheel) uses
-to open windows.
-
-| Display | Output |
-|---------|--------|
-| `:0`    | Built-in LCD (default) |
-| `:1`    | HDMI monitor (when connected) |
-
-**Selecting the display at startup (CLI):**
+### Direct CLI modes
 
 ```bash
-python main.py --display :0        # built-in LCD (default)
-python main.py --display :1        # HDMI monitor
+python main.py --mode feed
+python main.py --mode capture --output shot.jpg
+python main.py --mode probe
+python main.py --mode record-multi
 ```
 
-**Selecting the display at runtime (menu option 5):**
+Select a camera explicitly:
 
-From the interactive menu, choose option **5. Select display target**. The
-menu shows all detected X displays with labels and marks the current one.
-Type the number or the display string (e.g. `:1`) to switch.
-
-Auto-detection runs at startup: if `$DISPLAY` is not set (typical over SSH),
-eyeTool scans `/tmp/.X11-unix/` for XWayland sockets and picks `:0` (the
-built-in LCD) automatically.
-
-### Remote development over SSH
-
-The FriendlyElec Ubuntu 24.04 Desktop image runs a **Wayland** compositor.
-The `opencv-python` pip wheel bundles a **Qt5** backend that speaks X11 only;
-it connects to Wayland through XWayland automatically.
-
-When you SSH in as `pi`, eyeTool auto-detects the XWayland display and sets
-`DISPLAY=:0` for you. You do not need to export `DISPLAY` manually.
-
-However, the local X session may still require an X authority cookie. If
-`cv2.imshow` fails with *"Authorization required"* or *"could not connect to
-display"*:
-
-1. **On the NanoPi display itself** (local keyboard or a separate VNC
-   session), open a terminal and run:
-   ```bash
-   xhost +local:
-   ```
-   This grants any local user (including your SSH session) permission to open
-   windows on the running display.
-
-2. **From your SSH session**, launch eyeTool normally:
-   ```bash
-   python main.py --mode feed --device /dev/video20
-   ```
-
-The live feed window appears on the NanoPi's embedded display. Press `q` or ESC on the OpenCV window, or Ctrl+C in the console to quit.
-
-> **Security note:** `xhost +local:` is convenient for development on a
-> trusted local network. Disable it again with `xhost -local:` when you are
-> done, or restrict access to a specific user if multiple accounts log in
-> locally.
-
-## Requirements
-
-- FriendlyElec NanoPi M6 (RK3588S, arm64) with its embedded display
-- FriendlyElec Ubuntu 24.04 Desktop (pre-installed image)
-- Python 3.12+ (Python 3.14 preferred when available)
-- OpenCV 4.9.0.80
-- NumPy 1.26.4
-- A USB UVC webcam or a MIPI-CSI camera
-- System packages listed under **System Prerequisites**
-
-## Project Structure
-
+```bash
+python main.py --device /dev/video-camera0
+python main.py --device /dev/video20
+python main.py --device 0
 ```
-eyeTool/
-|-- main.py              # Main application script
-|-- requirements.txt     # Python dependencies
-|-- README.md            # Project documentation
+
+Select a display explicitly:
+
+```bash
+python main.py --display :0
+python main.py --display :1
 ```
+
+Enable console mirroring for external-library logs:
+
+```bash
+python main.py --debug
+```
+
+## Configuration Files
+
+Runtime configuration defaults to the `core/` directory:
+
+```text
+core/manufacturer_default.json      # Shipped baseline settings
+core/user_settings.json             # User delta from manufacturer defaults
+core/zones.json                     # Slot bindings, polygons, preprocessing
+core/manufacturer_zones.json        # Optional archived manufacturer zones
+```
+
+Set `EYETOOL_CONFIG_DIR` to place these files elsewhere:
+
+```bash
+export EYETOOL_CONFIG_DIR="$HOME/.config/eyeTool"
+python main.py
+```
+
+The configuration menu can save the current runtime state as the manufacturer baseline, restore the manufacturer baseline, clear user setting overrides, and show active config paths.
+
+## Recording Deployment Notes
+
+Recording settings live in `core/manufacturer_default.json` and user overrides:
+
+- **Primary directory:** `/media/pi/6333-3864`
+- **Fallback directory:** `~/Videos`
+- **Default segment duration:** 2 minutes
+- **Preferred codec:** `mpp_h264`
+- **Cleanup threshold:** delete older recordings when disk usage exceeds the configured threshold
+
+Before using multi-camera recording, mount the intended storage device and confirm the runtime user can write to it.
+
+## Display and SSH Operation
+
+eyeTool uses OpenCV GUI windows through X11/XWayland. Display selection follows the implementation order:
+
+1. `--display` command-line argument, when provided
+2. saved `display.target` from config
+3. existing parent-shell `DISPLAY`
+4. first socket found under `/tmp/.X11-unix/`
+
+The display helper attempts to merge GNOME/mutter XWayland authentication into `~/.Xauthority`. If GUI windows still fail from SSH, run this once on the NanoPi local desktop:
+
+```bash
+xhost +local:
+```
+
+Disable it later if needed:
+
+```bash
+xhost -local:
+```
+
+## Runtime Logs
+
+Each run creates a timestamped external-library log under:
+
+```text
+logs/YYYY-MM-DD-HHMMSS.log
+```
+
+OpenCV, V4L2, RKNN, GStreamer, and MPP messages may be redirected there instead of the console. Use `--debug` to mirror those messages to the console during troubleshooting.

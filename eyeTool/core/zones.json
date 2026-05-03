@@ -1,20 +1,25 @@
 {
   "slots": {
     "0": {
-      "port_path": "platform-xhci-hcd.4.auto-usb-0:1:1.0",
-      "name": "MV360 CH1"
-    },
-    "1": {
-      "port_path": "platform-xhci-hcd.4.auto-usb-0:1:1.2",
-      "name": "MV360 CH2"
-    },
-    "2": {
-      "port_path": "platform-xhci-hcd.4.auto-usb-0:1:1.4",
-      "name": "MV360 CH3"
-    },
-    "3": {
-      "port_path": "platform-xhci-hcd.4.auto-usb-0:1:1.6",
-      "name": "MV360 CH4"
+      "port_path": "platform-fc880000.usb-usb-0:1.1:1.0",
+      "polygon": [
+        [
+          158,
+          358
+        ],
+        [
+          1182,
+          358
+        ],
+        [
+          1182,
+          598
+        ],
+        [
+          144,
+          598
+        ]
+      ]
     }
   }
 }

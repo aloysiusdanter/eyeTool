@@ -43,4 +43,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
             "':1' (HDMI). Overrides auto-detection and $DISPLAY."
         ),
     )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Mirror external-library log messages to the console.",
+    )
     return parser.parse_args(argv)

@@ -26,6 +26,7 @@ from streams.compositor import GridCompositor
 from core.hotplug import HotplugMonitor
 from core.zones import load_zones
 from preprocessing.preprocess import Preprocess
+from utils.external_logging import open_external_log_for_subprocess
 import shutil
 
 # ── Shared mutable state ──────────────────────────────────────────────
@@ -112,8 +113,11 @@ def load_camera_feed(source: int | str) -> None:
     h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     fps = cap.get(cv2.CAP_PROP_FPS)
 
-    # Scale to display size (built-in LCD is 800x480)
-    display_w, display_h = 800, 480
+    # Get display resolution and scale accordingly
+    from core.camera import get_display_resolution
+    monitor_w, monitor_h = get_display_resolution()
+    # Scale to display size (use monitor resolution for best quality)
+    display_w, display_h = monitor_w, monitor_h
     det_status = "ON" if detection_enabled else "OFF"
     print(f"Feed info: {w}x{h} @ {fps:.1f} fps (letterboxed to {display_w}x{display_h})  |  source: {source}  |  display: {os.environ.get('DISPLAY', '?')}")
     multi_status = "3-CORE" if use_multi_core else "1-CORE"
@@ -138,23 +142,26 @@ def load_camera_feed(source: int | str) -> None:
     last_stats_ts = time.monotonic()
     try:
         while not _quit_requested:
-            if not frame_source.wait_new(timeout=1.0):
-                # Camera stalled; loop back and re-check _quit_requested.
-                continue
+            # Aggressive: poll instead of wait to avoid blocking
             snap = frame_source.get_latest()
             if snap is None:
+                # No frame yet, minimal sleep to avoid busy-spin
+                time.sleep(0.001)
                 continue
             frame, frame_ts = snap
-            # Work on a shallow copy so the capture thread can safely
-            # overwrite the underlying buffer on its next read.
-            frame = frame.copy()
+            # Aggressive: skip frame copy for maximum speed (risky but fast)
+            # frame = frame.copy()
 
             now = time.monotonic()
             if detector is not None:
                 det = detector.get_latest()
                 overlay_detections(frame, det, now)
 
-            frame_letterboxed = letterbox_frame(frame, display_w, display_h)
+            # Aggressive: skip letterboxing if frame already at target size
+            if frame.shape[1] == display_w and frame.shape[0] == display_h:
+                frame_letterboxed = frame
+            else:
+                frame_letterboxed = letterbox_frame(frame, display_w, display_h)
 
             elapsed = now - prev_time
             if elapsed > 0:
@@ -178,14 +185,10 @@ def load_camera_feed(source: int | str) -> None:
                                       cv2.WND_PROP_FULLSCREEN,
                                       cv2.WINDOW_FULLSCREEN)
                 first_frame = False
-            else:
-                # Keep fullscreen property set (XWayland sometimes loses it)
-                cv2.setWindowProperty("eyeTool - Camera Feed",
-                                      cv2.WND_PROP_FULLSCREEN,
-                                      cv2.WINDOW_FULLSCREEN)
+            # Aggressive: removed repeated fullscreen property setting for speed
 
-            wait_ms = max(1, int(frame_interval * 1000 - elapsed * 1000)) if frame_interval > 0 else 1
-            key = cv2.waitKey(wait_ms) & 0xFF
+            # Aggressive: no frame rate limiting - always wait 1ms for display refresh
+            key = cv2.waitKey(1) & 0xFF
             if key in (ord("q"), ord("Q"), 27):  # 27 = ESC
                 break
             if cv2.getWindowProperty("eyeTool - Camera Feed",
@@ -330,17 +333,21 @@ class _MppVideoWriter:
             f"mp4mux ! filesink location={output_path}"
         )
         try:
+            self._stderr_log = open_external_log_for_subprocess("gstreamer")
+            stderr_target = self._stderr_log.__enter__()
             self._proc = subprocess.Popen(
                 ["gst-launch-1.0", "-e"] + pipeline.split(),
                 stdin=subprocess.PIPE,
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
+                stderr=stderr_target,
             )
             self._opened = True
             self._writer_thread = threading.Thread(
                 target=self._writer_loop, name="MppWriter", daemon=True)
             self._writer_thread.start()
         except (FileNotFoundError, OSError) as e:
+            if hasattr(self, "_stderr_log"):
+                self._stderr_log.__exit__(None, None, None)
             print(f"[mpp] failed to launch GStreamer pipeline: {e}")
             self._opened = False
 
@@ -390,6 +397,8 @@ class _MppVideoWriter:
                 self._proc.kill()
                 self._proc.wait()
             self._proc = None
+        if hasattr(self, "_stderr_log"):
+            self._stderr_log.__exit__(None, None, None)
         self._opened = False
 
 
@@ -485,8 +494,9 @@ def load_multi_camera_feed() -> None:
 
     cfg = get_config()
     max_streams = int(cfg.get("streams.max_streams", 4))
-    display_w = int(cfg.get("display.width", 800))
-    display_h = int(cfg.get("display.height", 480))
+    # Use actual display resolution instead of fixed config
+    from core.camera import get_display_resolution
+    display_w, display_h = get_display_resolution()
     _target_fps = int(cfg.get("display.target_fps", 30))
     watchdog = float(cfg.get("streams.watchdog_stall_s", 2.0))
 
@@ -624,6 +634,7 @@ def load_multi_camera_feed() -> None:
     loop_error_count = 0
     max_loop_errors = 10
     last_error_log_time = 0
+    start_time = time.monotonic()
     
     try:
         while not _quit_requested:
@@ -706,23 +717,19 @@ def load_multi_camera_feed() -> None:
                         writer = None
 
                 if now - last_stats_ts > 2.0:
-                    # Print table (using ASCII for compatibility)
-                    print("\n+------------------------------------------------------------------------------+")
-                    print(f"| {'Slot':<6} | {'Status':<12} | {'Capture FPS':<12} | {'Detect FPS':<12} | {'Display FPS':<12} |")
-                    print("+------------------------------------------------------------------------------+")
-                    
+                    # Print compact two-row format
+                    slot_info = []
                     for snap in snapshots:
                         status = snap.state.value
                         fps_str = f"{snap.capture_fps:5.1f}Hz"
-                        print(f"| slot{snap.slot_id:<2} | {status:<12} | {fps_str:<12} |")
+                        slot_info.append(f"slot{snap.slot_id}-{status} {fps_str}")
+                    
+                    slot_line = "  __  ".join(slot_info)
+                    print(f"\n{slot_line}")
                     
                     det_fps = detector.fps() if detector else 0.0
-                    print("+------------------------------------------------------------------------------+")
-                    print(f"| {'':<6} | {'':<12} | {'':<12} | {f'{det_fps:5.1f}Hz':<12} | {f'{actual_fps:5.1f}Hz':<12} |")
-                    print("+------------------------------------------------------------------------------+")
-                    print(f"| {'':<6} | {'':<12} | {'':<12} | {'':<12} | {'Recorded:':<12} |")
-                    print(f"| {'':<6} | {'':<12} | {'':<12} | {'':<12} | {frames_written:<12} |")
-                    print("+------------------------------------------------------------------------------+")
+                    elapsed_time = now - start_time
+                    print(f"Detect FPS {det_fps:5.1f}Hz; Display FPS {actual_fps:5.1f}Hz; Recorded {frames_written} frames ({elapsed_time:.0f}s)")
                     
                     last_stats_ts = now
 
@@ -1548,52 +1555,92 @@ def setup_zones_menu() -> None:
 
 
 def interactive_menu(source: int | str, output: str) -> None:
-    print("=== eyeTool - Camera Application ===")
-    print(f"Camera source: {source}")
-    print(f"Display target: {os.environ.get('DISPLAY', '(not set)')}")
-    det_status = "ON" if detection_enabled else "OFF"
-    cfg = get_config()
-    rec_status = "ON" if cfg.get("recording.enabled", True) else "OFF"
-    print(" 1. Live camera feed (single)")
-    print(" 2. Multi-camera feed (with recording)")
-    print(" 3. Setup alarm zones")
-    print(" 4. Image preprocessing")
-    print(" 5. Monitoring TUI")
-    print(" 6. Configuration (save/restore default)")
-    print(" 7. Capture single image")
-    print(" 8. Probe camera (no GUI)")
-    print(" 9. Select display target")
-    print(f"10. Detection settings [{det_status}]")
-    print(f"11. Recording settings [{rec_status}]")
-    print("12. Exit")
-
     while True:
+        print("\n=== eyeTool - Camera Application ===")
+        print(f"Camera source: {source}")
+        print(f"Display target: {os.environ.get('DISPLAY', '(not set)')}")
+        det_status = "ON" if detection_enabled else "OFF"
+        cfg = get_config()
+        rec_status = "ON" if cfg.get("recording.enabled", True) else "OFF"
+        print(" 1. Multi-camera feed (with recording)")
+        print(" 2. Live camera feed (single)")
+        print(" 3. Setup alarm zones")
+        print(" 4. Image preprocessing")
+        print(" 5. Probe camera (no GUI)")
+        print(" 6. Monitoring TUI")
+        print(" 7. Capture single image")
+        print(" 8. Select display target")
+        print(f" 9. Detection settings [{det_status}]")
+        print(f"10. Recording settings [{rec_status}]")
+        print("11. Configuration Saving")
+        print("12. Exit")
+
         choice = input("\nEnter your choice (1-12): ").strip()
         if choice == "1":
-            load_camera_feed(source)
-        elif choice == "2":
             load_multi_camera_feed()
+        elif choice == "2":
+            select_camera_for_feed()
         elif choice == "3":
             setup_zones_menu()
         elif choice == "4":
             preprocess_settings_menu()
         elif choice == "5":
+            probe_camera(source)
+        elif choice == "6":
             from ui.monitor import run as run_monitor
             run_monitor()
-        elif choice == "6":
-            configuration_menu()
         elif choice == "7":
             capture_single_image(source, output)
         elif choice == "8":
-            probe_camera(source)
-        elif choice == "9":
             select_display_menu()
-        elif choice == "10":
+        elif choice == "9":
             detection_settings_menu()
-        elif choice == "11":
+        elif choice == "10":
             recording_settings_menu()
+        elif choice == "11":
+            configuration_menu()
         elif choice == "12":
             print("Goodbye!")
             break
         else:
             print("Invalid choice. Please enter 1-12.")
+
+
+def select_camera_for_feed() -> None:
+    """Select camera for live feed by probing all available cameras."""
+    print("\n--- Select a Camera for Live Feed ---")
+    
+    from core.camera import find_all_cameras, test_camera, resolve_camera_source
+    
+    # Get all available cameras
+    all_cameras = find_all_cameras()
+    working_cameras = []
+    
+    for camera in all_cameras:
+        if test_camera(camera):
+            working_cameras.append(camera)
+    
+    if not working_cameras:
+        print("\nNo working cameras found. Using default auto-detection.")
+        source = resolve_camera_source(None)
+        load_camera_feed(source)
+        return
+    
+    # Display working cameras
+    print("\nAvailable cameras:")
+    for i, camera in enumerate(working_cameras, 1):
+        print(f"  {i}. {camera}")
+    
+    while True:
+        try:
+            choice = input(f"\nEnter choice (1-{len(working_cameras)}): ").strip()
+            idx = int(choice) - 1
+            if 0 <= idx < len(working_cameras):
+                selected_camera = working_cameras[idx]
+                print(f"Selected: {selected_camera}")
+                load_camera_feed(selected_camera)
+                break
+            else:
+                print("Invalid choice. Please try again.")
+        except ValueError:
+            print("Please enter a number.")

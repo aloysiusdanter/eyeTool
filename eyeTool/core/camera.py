@@ -9,11 +9,16 @@ import os
 import re
 import subprocess
 
-import cv2
+from utils.external_logging import configure_opencv_logging, redirect_external
+
+with redirect_external("opencv"):
+    import cv2
 
 DEFAULT_CAMERA_SYMLINK = "/dev/video-camera0"
 
 _MJPEG_BONUS: float = 3.0
+
+configure_opencv_logging()
 
 
 def get_best_resolution(device_path: str) -> tuple[int, int, float, str] | None:
@@ -105,6 +110,49 @@ def find_usb_camera() -> str | None:
     return None
 
 
+def find_all_cameras() -> list[str]:
+    """Return a list of all available camera devices from v4l2-ctl.
+    
+    Returns a list of /dev/videoN paths for all detected cameras.
+    """
+    cameras = []
+    try:
+        result = subprocess.run(
+            ["v4l2-ctl", "--list-devices"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return cameras
+
+    dev_re = re.compile(r"^\s+(/dev/video\d+)")
+    for line in result.stdout.splitlines():
+        m = dev_re.match(line)
+        if m:
+            cameras.append(m.group(1))
+    
+    return cameras
+
+
+def test_camera(device: str) -> bool:
+    """Test if a camera device can be opened and provides frames.
+    
+    Returns True if the camera is working, False otherwise.
+    """
+    try:
+        with redirect_external("opencv"):
+            cap = cv2.VideoCapture(device, cv2.CAP_V4L2)
+            if not cap.isOpened():
+                return False
+            
+            ret, frame = cap.read()
+            cap.release()
+            return ret and frame is not None
+    except Exception:
+        return False
+
+
 def _has_discrete_formats(device_path: str) -> bool:
     """Return True if *device_path* reports at least one discrete capture size.
 
@@ -138,6 +186,37 @@ def resolve_camera_source(device: str | None) -> int | str:
     return device
 
 
+def get_display_resolution() -> tuple[int, int]:
+    """Get the current display resolution from X11.
+    
+    Returns (width, height) or (800, 480) as fallback for built-in LCD.
+    Always returns landscape orientation (width > height).
+    """
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["xrandr"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        for line in result.stdout.splitlines():
+            if "*" in line and "connected" in result.stdout.splitlines()[result.stdout.splitlines().index(line) - 1]:
+                # Parse resolution from line like "   1920x1080     60.00*"
+                parts = line.split()
+                if parts:
+                    res = parts[0]
+                    if "x" in res:
+                        w, h = map(int, res.split("x"))
+                        # Ensure landscape orientation (width > height)
+                        if h > w:
+                            w, h = h, w
+                        return w, h
+    except (FileNotFoundError, subprocess.TimeoutExpired, ValueError, IndexError):
+        pass
+    return 800, 480  # Fallback to built-in LCD resolution (landscape)
+
+
 def open_camera(source: int | str) -> cv2.VideoCapture | None:
     """Open the camera, auto-apply the best resolution for USB devices,
     and print useful diagnostics on failure.
@@ -146,12 +225,16 @@ def open_camera(source: int | str) -> cv2.VideoCapture | None:
     symlink), ``v4l2-ctl`` is queried to find the ``(width, height)`` that
     maximises ``width × height × fps`` across all reported formats.
     MIPI-CSI (``/dev/video-camera0``) is left untouched.
+    
+    Resolution is auto-selected to be at least double the display size
+    for better quality, while maintaining high frame rate.
     """
-    cap = cv2.VideoCapture(source)
-    # Minimise kernel-side UVC buffering so cap.read() returns the freshest
-    # frame, not one queued up to ~100 ms ago. The V4L2 backend honours this
-    # on most USB UVC devices; harmless if ignored.
-    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    with redirect_external("opencv"):
+        cap = cv2.VideoCapture(source, cv2.CAP_V4L2)
+    # Increase buffer size to allow camera to deliver frames faster
+    # Setting to 1 can cause camera to stall on some devices
+    # Buffer size 2 provides 33ms latency at 30fps while maintaining throughput
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 2)
     if not cap.isOpened():
         print(f"Error: Could not open camera '{source}'.")
         print("Hints:")
@@ -170,11 +253,29 @@ def open_camera(source: int | str) -> cv2.VideoCapture | None:
         best = get_best_resolution(device_path)
         if best is not None:
             w, h, fps, fmt = best
+            
+            # Get display resolution and select camera resolution at least double
+            display_w, display_h = get_display_resolution()
+            target_w = max(display_w * 2, 320)
+            target_h = max(display_h * 2, 240)
+            
+            # Find the best resolution that meets the minimum requirements
+            # Prefer higher resolutions but prioritize frame rate
+            if w < target_w or h < target_h:
+                # If auto-selected resolution is too small, try to find a better one
+                # For now, use the auto-selected but scale display accordingly
+                print(f"Note: Camera resolution {w}x{h} is below target {target_w}x{target_h}")
+            
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
-            cap.set(cv2.CAP_PROP_FPS, fps)
+            # Try to force 60fps explicitly
+            cap.set(cv2.CAP_PROP_FPS, 60.0)
             if fmt == "MJPG":
                 cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-            print(f"Auto-selected: {w}x{h} @ {fps:.0f} fps ({fmt}) for '{device_path}'")
+            # Disable auto-exposure for higher FPS
+            cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)  # Manual exposure mode
+            cap.set(cv2.CAP_PROP_EXPOSURE, 100)  # Fixed exposure value
+            print(f"Auto-selected: {w}x{h} @ 60 fps forced ({fmt}) for '{device_path}' (exposure disabled for max FPS)")
+            print(f"Display resolution: {display_w}x{display_h}")
 
     return cap

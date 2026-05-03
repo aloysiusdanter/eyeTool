@@ -18,19 +18,24 @@ from __future__ import annotations
 
 import os
 import time
+from typing import TYPE_CHECKING, Any
 
 import cv2
 import numpy as np
 from scipy.special import softmax as scipy_softmax
-from rknnlite.api import RKNNLite
+
+from utils.external_logging import redirect_external
+
+if TYPE_CHECKING:
+    from rknnlite.api import RKNNLite
 
 # Detection constants
 INPUT_SIZE = 640
 NMS_THRESH = 0.45
 DFL_LEN = 16  # 64 channels / 4 sides
 
-_RKNN_SINGLE: RKNNLite | None = None
-_RKNN_ALL_CORES: RKNNLite | None = None
+_RKNN_SINGLE: Any = None
+_RKNN_ALL_CORES: Any = None
 
 # Timing stats for profiling
 _npu_time_sum = 0.0
@@ -39,7 +44,7 @@ _npu_count = 0
 _last_stats_ts = 0.0
 
 
-def _get_rknn(model_path: str = "yolov8n.rknn") -> RKNNLite:
+def _get_rknn(model_path: str = "yolov8n.rknn") -> "RKNNLite":
     """Singleton RKNNLite loader (single core, AUTO)."""
     global _RKNN_SINGLE
     if _RKNN_SINGLE is not None:
@@ -51,17 +56,19 @@ def _get_rknn(model_path: str = "yolov8n.rknn") -> RKNNLite:
         if os.path.exists(candidate):
             model_path = candidate
     print(f"Loading RKNN model: {model_path}")
-    r = RKNNLite()
-    if r.load_rknn(model_path) != 0:
-        raise RuntimeError(f"load_rknn failed for {model_path}")
-    if r.init_runtime(core_mask=RKNNLite.NPU_CORE_AUTO) != 0:
-        raise RuntimeError("init_runtime failed")
+    with redirect_external("rknn"):
+        from rknnlite.api import RKNNLite
+        r = RKNNLite()
+        if r.load_rknn(model_path) != 0:
+            raise RuntimeError(f"load_rknn failed for {model_path}")
+        if r.init_runtime(core_mask=RKNNLite.NPU_CORE_AUTO) != 0:
+            raise RuntimeError("init_runtime failed")
     print("RKNN runtime initialized (NPU_CORE_AUTO).")
     _RKNN_SINGLE = r
     return _RKNN_SINGLE
 
 
-def _get_rknn_all_cores(model_path: str = "yolov8n.rknn") -> RKNNLite:
+def _get_rknn_all_cores(model_path: str = "yolov8n.rknn") -> "RKNNLite":
     """Singleton RKNNLite loader using all three NPU cores simultaneously.
 
     core_mask=7 = NPU_CORE_0|NPU_CORE_1|NPU_CORE_2 tells the RKNN runtime
@@ -77,12 +84,14 @@ def _get_rknn_all_cores(model_path: str = "yolov8n.rknn") -> RKNNLite:
         if os.path.exists(candidate):
             model_path = candidate
     print(f"Loading RKNN model (all-core): {model_path}")
-    r = RKNNLite()
-    if r.load_rknn(model_path) != 0:
-        raise RuntimeError(f"load_rknn failed for {model_path}")
-    # mask 7 = NPU_CORE_0 | NPU_CORE_1 | NPU_CORE_2
-    if r.init_runtime(core_mask=7) != 0:
-        raise RuntimeError("init_runtime failed for all-core mode")
+    with redirect_external("rknn"):
+        from rknnlite.api import RKNNLite
+        r = RKNNLite()
+        if r.load_rknn(model_path) != 0:
+            raise RuntimeError(f"load_rknn failed for {model_path}")
+        # mask 7 = NPU_CORE_0 | NPU_CORE_1 | NPU_CORE_2
+        if r.init_runtime(core_mask=7) != 0:
+            raise RuntimeError("init_runtime failed for all-core mode")
     print("RKNN runtime initialized (NPU_CORE_0|1|2, all-core).")
     _RKNN_ALL_CORES = r
     return _RKNN_ALL_CORES
@@ -212,7 +221,7 @@ def post_process(outputs: list[np.ndarray], conf_thres: float = 0.5
 
 
 def infer(frame_bgr: np.ndarray, conf_thres: float = 0.5,
-          rknn: RKNNLite | None = None
+          rknn: "RKNNLite | None" = None
           ) -> tuple[np.ndarray, np.ndarray, np.ndarray, float, tuple[int, int]]:
     """Run NPU inference on a BGR frame.
 
@@ -230,7 +239,8 @@ def infer(frame_bgr: np.ndarray, conf_thres: float = 0.5,
     # Time NPU inference
     t_npu = time.monotonic()
     # RKNNLite expects a 4D NHWC tensor; add the batch dim.
-    outputs = rknn.inference(inputs=[np.expand_dims(rgb, axis=0)])
+    with redirect_external("rknn"):
+        outputs = rknn.inference(inputs=[np.expand_dims(rgb, axis=0)])
     _npu_time_sum += time.monotonic() - t_npu
 
     boxes, classes, scores = post_process(outputs, conf_thres=conf_thres)
@@ -249,12 +259,14 @@ def warmup() -> None:
     """Run one dummy inference to JIT/warm the NPU. ~500 ms first call."""
     rknn = _get_rknn()
     dummy = np.zeros((1, INPUT_SIZE, INPUT_SIZE, 3), dtype=np.uint8)
-    rknn.inference(inputs=[dummy])
+    with redirect_external("rknn"):
+        rknn.inference(inputs=[dummy])
 
 
 def warmup_all_cores() -> None:
     """Warm up the all-core RKNN instance."""
     rknn = _get_rknn_all_cores()
     dummy = np.zeros((1, INPUT_SIZE, INPUT_SIZE, 3), dtype=np.uint8)
-    rknn.inference(inputs=[dummy])
+    with redirect_external("rknn"):
+        rknn.inference(inputs=[dummy])
     print("  Warmed up all-core RKNN instance")

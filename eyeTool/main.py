@@ -9,36 +9,42 @@ list of prerequisites.
 import sys
 
 from cli import parse_args
-from core.camera import resolve_camera_source
-from core.display import auto_set_display, set_display
+from utils.external_logging import close_logging, init_logging
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
+    init_logging(debug=args.debug)
 
-    if args.display is not None:
-        set_display(args.display)
-    else:
-        auto_set_display()
+    try:
+        from core.camera import resolve_camera_source
+        from core.display import auto_set_display, set_display
 
-    source = resolve_camera_source(args.device)
+        if args.display is not None:
+            set_display(args.display)
+        else:
+            auto_set_display()
 
-    if args.mode == "menu":
-        from ui.menus import interactive_menu
-        interactive_menu(source, args.output)
-    elif args.mode == "feed":
-        from ui.menus import load_camera_feed
-        load_camera_feed(source)
-    elif args.mode == "capture":
-        from ui.menus import capture_single_image
-        capture_single_image(source, args.output)
-    elif args.mode == "probe":
-        from ui.menus import probe_camera
-        probe_camera(source)
-    elif args.mode == "record-multi":
-        from ui.menus import record_multi_camera_feed
-        record_multi_camera_feed()
-    return 0
+        source = resolve_camera_source(args.device)
+
+        if args.mode == "menu":
+            from ui.menus import interactive_menu
+            interactive_menu(source, args.output)
+        elif args.mode == "feed":
+            from ui.menus import load_camera_feed
+            load_camera_feed(source)
+        elif args.mode == "capture":
+            from ui.menus import capture_single_image
+            capture_single_image(source, args.output)
+        elif args.mode == "probe":
+            from ui.menus import probe_camera
+            probe_camera(source)
+        elif args.mode == "record-multi":
+            from ui.menus import record_multi_camera_feed
+            record_multi_camera_feed()
+        return 0
+    finally:
+        close_logging()
 
 
 if __name__ == "__main__":
