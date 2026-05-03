@@ -259,16 +259,15 @@ def _get_disk_usage(path: str) -> float:
 
 
 def _cleanup_old_files(save_dir: str, threshold_percent: float) -> int:
-    """Delete oldest .mp4 files in *save_dir* until disk usage is below threshold.
+    """Delete oldest recording files in *save_dir* until disk usage is below threshold.
     
     Returns number of files deleted.
     """
     deleted_count = 0
     try:
-        # Get all .mp4 files with their modification times
         files = []
         for f in os.listdir(save_dir):
-            if f.endswith(".mp4"):
+            if f.endswith((".ts", ".mp4")):
                 full_path = os.path.join(save_dir, f)
                 try:
                     mtime = os.path.getmtime(full_path)
@@ -329,8 +328,8 @@ class _MppVideoWriter:
             f"rawvideoparse width={width} height={height} "
             f"format=bgr framerate={int(fps)}/1 ! "
             f"videoconvert ! video/x-raw,format=NV12 ! "
-            f"mpph264enc ! h264parse ! "
-            f"mp4mux ! filesink location={output_path}"
+            f"mpph264enc ! h264parse config-interval=1 ! "
+            f"mpegtsmux ! filesink location={output_path} sync=false"
         )
         try:
             self._stderr_log = open_external_log_for_subprocess("gstreamer")
@@ -429,13 +428,19 @@ def _create_video_writer(
             if writer.isOpened():
                 print(f"[mpp] hardware H.264 encoder active")
                 return writer
-            print("[mpp] failed to open, falling back to software codec")
+            print("[mpp] failed to open hardware H.264 encoder")
         else:
-            print("[mpp] mpph264enc not available, falling back to software codec")
-        codec = "mp4v"  # fallback
+            print("[mpp] mpph264enc not available")
+        return cv2.VideoWriter()
 
     fourcc = cv2.VideoWriter_fourcc(*codec)
     return cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+
+
+def _recording_extension(codec: str) -> str:
+    if codec == "mpp_h264":
+        return ".ts"
+    return ".mp4"
 
 
 # ── Camera feed functions ─────────────────────────────────────────────
@@ -604,7 +609,8 @@ def load_multi_camera_feed() -> None:
     # Track segment start time for 2-minute segments
     _segment_start_time = time.monotonic()
     ts = time.strftime("%Y%m%d_%H%M%S")
-    output_path = os.path.join(save_dir, f"multifeed_{ts}.mp4")
+    ext = _recording_extension(codec)
+    output_path = os.path.join(save_dir, f"multifeed_{ts}{ext}")
     writer = _create_video_writer(output_path, codec, fps, display_w, display_h)
     frames_written = 0
     recording = recording_enabled and writer.isOpened()
@@ -687,7 +693,7 @@ def load_multi_camera_feed() -> None:
                     _cleanup_old_files(save_dir, storage_threshold)
                     
                     ts = time.strftime("%Y%m%d_%H%M%S")
-                    new_path = os.path.join(save_dir, f"multifeed_{ts}.mp4")
+                    new_path = os.path.join(save_dir, f"multifeed_{ts}{ext}")
                     print(f"Segment split: opening new file -> {new_path}")
                     try:
                         new_writer = _create_video_writer(new_path, codec, fps, display_w, display_h)
@@ -810,16 +816,19 @@ def record_camera_feed(source: int | str, output: str = "") -> None:
     if cap is None:
         return
 
+    cfg = get_config()
+    codec = cfg.get("recording.codec", "mpp_h264")
+    ext = _recording_extension(codec)
+    save_dir = os.path.dirname(os.path.abspath(output)) if output else cfg.get("recording.save_dir", "/media/pi/6333-3864")
     if not output:
-        save_dir = "/media/pi/6333-3864"
         try:
             os.makedirs(save_dir, exist_ok=True)
         except (OSError, PermissionError):
-            save_dir = os.path.expanduser("~/Videos")
+            save_dir = os.path.expanduser(cfg.get("recording.fallback_dir", "~/Videos"))
             os.makedirs(save_dir, exist_ok=True)
             print(f"SD card not available, saving to {save_dir}")
         ts = time.strftime("%Y%m%d_%H%M%S")
-        output = os.path.join(save_dir, f"recording_{ts}.mp4")
+        output = os.path.join(save_dir, f"recording_{ts}{ext}")
 
     w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -837,13 +846,12 @@ def record_camera_feed(source: int | str, output: str = "") -> None:
     frame_source = FrameSource(cap)
     frame_source.start()
 
-    writer: cv2.VideoWriter | None = None
+    writer: cv2.VideoWriter | _MppVideoWriter | None = None
     recording = False
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     frames_written = 0
     _stop = threading.Event()
     _current_minute = time.localtime().tm_min
-    _base_output = output if output else os.path.join(save_dir, "recording_000000_000000.mp4")
+    _base_output = output if output else os.path.join(save_dir, f"recording_000000_000000{ext}")
 
     def _input_loop():
         """Run in a background thread: read terminal commands."""
@@ -858,8 +866,8 @@ def record_camera_feed(source: int | str, output: str = "") -> None:
                     w_ = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
                     h_ = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
                     ts = time.strftime("%Y%m%d_%H%M%S")
-                    _base_output = os.path.join(save_dir, f"recording_{ts}.mp4")
-                    wr = cv2.VideoWriter(_base_output, fourcc, fps, (w_, h_))
+                    _base_output = os.path.join(save_dir, f"recording_{ts}{ext}")
+                    wr = _create_video_writer(_base_output, codec, fps, w_, h_)
                     if not wr.isOpened():
                         print(f"Error: could not open '{_base_output}' for writing.")
                     else:
@@ -904,10 +912,10 @@ def record_camera_feed(source: int | str, output: str = "") -> None:
                 if current_minute != _current_minute:
                     writer.release()
                     ts = time.strftime("%Y%m%d_%H%M%S")
-                    _base_output = os.path.join(save_dir, f"recording_{ts}.mp4")
+                    _base_output = os.path.join(save_dir, f"recording_{ts}{ext}")
                     w_ = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
                     h_ = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-                    wr = cv2.VideoWriter(_base_output, fourcc, fps, (w_, h_))
+                    wr = _create_video_writer(_base_output, codec, fps, w_, h_)
                     if wr.isOpened():
                         writer = wr
                         _current_minute = current_minute
@@ -969,16 +977,17 @@ def record_multi_camera_feed() -> None:
                             saved_preprocess=saved_preprocess)
     manager.open_all_present()
 
-    save_dir = "/media/pi/6333-3864"
+    codec = cfg.get("recording.codec", "mpp_h264")
+    ext = _recording_extension(codec)
+    save_dir = cfg.get("recording.save_dir", "/media/pi/6333-3864")
     try:
         os.makedirs(save_dir, exist_ok=True)
     except (OSError, PermissionError):
-        save_dir = os.path.expanduser("~/Videos")
+        save_dir = os.path.expanduser(cfg.get("recording.fallback_dir", "~/Videos"))
         os.makedirs(save_dir, exist_ok=True)
         print(f"SD card not available, saving to {save_dir}")
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
 
-    writers: dict[int, cv2.VideoWriter] = {}
+    writers: dict[int, cv2.VideoWriter | _MppVideoWriter] = {}
     frames_written: dict[int, int] = {}
     recording: dict[int, bool] = {}
     output_paths: dict[int, str] = {}
@@ -1009,9 +1018,9 @@ def record_multi_camera_feed() -> None:
             frame, _ = snap
             h_, w_ = frame.shape[:2]
             ts = time.strftime("%Y%m%d_%H%M%S")
-            path = os.path.join(save_dir, f"slot{sid}_{ts}.mp4")
+            path = os.path.join(save_dir, f"slot{sid}_{ts}{ext}")
             fps_ = 25.0
-            wr = cv2.VideoWriter(path, fourcc, fps_, (w_, h_))
+            wr = _create_video_writer(path, codec, fps_, w_, h_)
             if wr.isOpened():
                 writers[sid] = wr
                 frames_written[sid] = 0
@@ -1050,9 +1059,9 @@ def record_multi_camera_feed() -> None:
                     frame, _ = snap
                     h_, w_ = frame.shape[:2]
                     ts = time.strftime("%Y%m%d_%H%M%S")
-                    path = os.path.join(save_dir, f"slot{sid}_{ts}.mp4")
+                    path = os.path.join(save_dir, f"slot{sid}_{ts}{ext}")
                     fps_ = 25.0
-                    wr = cv2.VideoWriter(path, fourcc, fps_, (w_, h_))
+                    wr = _create_video_writer(path, codec, fps_, w_, h_)
                     if not wr.isOpened():
                         print(f"Slot {sid}: could not open '{path}' for writing.")
                     else:
@@ -1095,9 +1104,9 @@ def record_multi_camera_feed() -> None:
                 if current_minute != _current_minutes.get(sid, -1):
                     wr.release()
                     ts = time.strftime("%Y%m%d_%H%M%S")
-                    new_path = os.path.join(save_dir, f"slot{sid}_{ts}.mp4")
+                    new_path = os.path.join(save_dir, f"slot{sid}_{ts}{ext}")
                     h_, w_ = frame.shape[:2]
-                    new_wr = cv2.VideoWriter(new_path, fourcc, 25.0, (w_, h_))
+                    new_wr = _create_video_writer(new_path, codec, 25.0, w_, h_)
                     if new_wr.isOpened():
                         writers[sid] = new_wr
                         _current_minutes[sid] = current_minute
