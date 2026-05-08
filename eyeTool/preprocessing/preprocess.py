@@ -1,5 +1,5 @@
 """Per-camera image preprocessing (brightness / contrast / saturation /
-gamma).
+gamma / flip / rotation).
 
 Tuned for the RK3588 CPU budget at 25-60 fps on 720p frames:
 
@@ -9,6 +9,7 @@ Tuned for the RK3588 CPU budget at 25-60 fps on 720p frames:
 * Saturation requires a BGR<->HSV round-trip (~3-5 ms) so it is
   *only* applied when the user actually changed it; the common
   "saturation == 1.0" case is a no-op.
+* Flip and rotation are applied after color corrections.
 
 A ``Preprocess`` instance is callable. Plug it into
 ``FrameSource(preprocess=...)`` and any frame that comes out of the
@@ -23,7 +24,10 @@ Stored format (``zones.json[slots][N].preprocessing``)::
         "brightness": 0.0,    # additive, range [-1.0, +1.0]  (0 = off)
         "contrast":   1.0,    # multiplicative around 128, [0.0, 3.0]
         "saturation": 1.0,    # HSV S scale,                  [0.0, 3.0]
-        "gamma":      1.0     # gamma correction,             [0.1, 3.0]
+        "gamma":      1.0,    # gamma correction,             [0.1, 3.0]
+        "flip_h":     False,  # flip horizontally
+        "flip_v":     False,  # flip vertically
+        "rotate":     0       # rotation in degrees (0, 90, 180, 270)
     }
 """
 
@@ -40,6 +44,7 @@ BRIGHTNESS_RANGE = (-1.0, 1.0)
 CONTRAST_RANGE = (0.0, 3.0)
 SATURATION_RANGE = (0.0, 3.0)
 GAMMA_RANGE = (0.1, 3.0)
+ROTATION_RANGE = (-180, 180)
 
 
 def _clamp(value: float, lo: float, hi: float) -> float:
@@ -52,12 +57,16 @@ class Preprocess:
     contrast: float = 1.0     # [0, 3]
     saturation: float = 1.0   # [0, 3]
     gamma: float = 1.0        # [0.1, 3]
+    flip_h: bool = False      # flip horizontally
+    flip_v: bool = False      # flip vertically
+    rotate: int = 0           # rotation in degrees (0-359)
 
     def __post_init__(self) -> None:
         self.brightness = _clamp(self.brightness, *BRIGHTNESS_RANGE)
         self.contrast = _clamp(self.contrast, *CONTRAST_RANGE)
         self.saturation = _clamp(self.saturation, *SATURATION_RANGE)
         self.gamma = _clamp(self.gamma, *GAMMA_RANGE)
+        self.rotate = int(max(ROTATION_RANGE[0], min(ROTATION_RANGE[1], self.rotate)))
         self._build_lut()
 
     # --- LUT --------------------------------------------------------
@@ -78,7 +87,10 @@ class Preprocess:
         return (abs(self.brightness) < 1e-3 and
                 abs(self.contrast - 1.0) < 1e-3 and
                 abs(self.saturation - 1.0) < 1e-3 and
-                abs(self.gamma - 1.0) < 1e-3)
+                abs(self.gamma - 1.0) < 1e-3 and
+                not self.flip_h and
+                not self.flip_v and
+                self.rotate == 0)
 
     def __call__(self, frame: np.ndarray) -> np.ndarray:
         """Apply preprocessing in-place-friendly fashion. Always returns
@@ -91,6 +103,21 @@ class Preprocess:
             s = hsv[:, :, 1].astype(np.float32) * self.saturation
             hsv[:, :, 1] = np.clip(s, 0, 255).astype(np.uint8)
             out = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+        
+        # Apply flip
+        if self.flip_h:
+            out = cv2.flip(out, 1)
+        if self.flip_v:
+            out = cv2.flip(out, 0)
+
+        # Apply rotation (arbitrary degrees)
+        if self.rotate != 0:
+            h, w = out.shape[:2]
+            center = (w // 2, h // 2)
+            matrix = cv2.getRotationMatrix2D(center, self.rotate, 1.0)
+            out = cv2.warpAffine(out, matrix, (w, h), flags=cv2.INTER_LINEAR,
+                               borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0))
+
         return out
 
     # --- (de)serialisation ------------------------------------------
@@ -103,6 +130,9 @@ class Preprocess:
             contrast=float(d.get("contrast", 1.0)),
             saturation=float(d.get("saturation", 1.0)),
             gamma=float(d.get("gamma", 1.0)),
+            flip_h=bool(d.get("flip_h", False)),
+            flip_v=bool(d.get("flip_v", False)),
+            rotate=int(d.get("rotate", 0)),
         )
 
     def to_dict(self) -> dict:
@@ -111,4 +141,7 @@ class Preprocess:
             "contrast": round(self.contrast, 3),
             "saturation": round(self.saturation, 3),
             "gamma": round(self.gamma, 3),
+            "flip_h": self.flip_h,
+            "flip_v": self.flip_v,
+            "rotate": self.rotate,
         }

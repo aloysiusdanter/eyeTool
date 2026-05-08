@@ -45,6 +45,7 @@ MANUFACTURER_DEFAULTS: dict[str, Any] = {
         "detect_every_n": 1,
         "use_multi_core": False,
         "person_class_id": 0,
+        "target_fps": 30,
     },
     "streams": {
         "max_streams": 4,
@@ -71,6 +72,12 @@ MANUFACTURER_DEFAULTS: dict[str, Any] = {
         "segment_duration_min": 2,
         "codec": "mpp_h264",  # Options: mpp_h264 (HW), mp4v, mjpg, avc1
         "storage_threshold_percent": 20,  # Delete when disk is 20% full
+    },
+    "camera_mapping": {
+        "top_left": None,
+        "top_right": None,
+        "bottom_left": None,
+        "bottom_right": None,
     },
 }
 

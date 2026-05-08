@@ -30,9 +30,6 @@ polygon as a list of ``(x, y)`` tuples), explicitly deletes the polygon
 
 from __future__ import annotations
 
-import os
-import re
-import subprocess
 import sys
 
 import cv2
@@ -43,29 +40,9 @@ from utils.terminal_input import RawStdin, normalise_cv2_key
 
 def _detect_screen_size(default: tuple[int, int] = (800, 480)
                         ) -> tuple[int, int]:
-    """Best-effort current X11 screen resolution.
-
-    Falls back to *default* if ``xrandr`` is unavailable, returns
-    nothing parseable, or DISPLAY isn't set. The first ``current
-    NNNN x NNNN`` token from ``xrandr --current`` wins; that always
-    matches the active screen on a single-output setup like the LCD.
-    """
-    if not os.environ.get("DISPLAY"):
-        return default
-    try:
-        out = subprocess.check_output(
-            ["xrandr", "--current"], stderr=subprocess.DEVNULL,
-            timeout=2.0,
-        ).decode("utf-8", errors="ignore")
-    except (FileNotFoundError, subprocess.SubprocessError, OSError):
-        return default
-    m = re.search(r"current\s+(\d+)\s*x\s*(\d+)", out)
-    if not m:
-        return default
-    try:
-        return int(m.group(1)), int(m.group(2))
-    except ValueError:
-        return default
+    """Best-effort current X11 screen resolution."""
+    from core.display import get_display_resolution
+    return get_display_resolution(default)
 
 _BG = (24, 24, 24)
 _FONT = cv2.FONT_HERSHEY_SIMPLEX
@@ -238,13 +215,8 @@ def run(frame: np.ndarray,
     cross_y = (img_y0 + img_y1) // 2
     status = ""
 
-    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
-    cv2.moveWindow(window_name, 800, 0)  # Position on HDMI display
-    # Initial fullscreen request -- we re-assert it every frame below
-    # because some compositors (XWayland in particular) drop the flag
-    # when the window first becomes mapped.
-    cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN,
-                          cv2.WINDOW_FULLSCREEN)
+    from core.display import create_fullscreen_window, set_fullscreen
+    create_fullscreen_window(window_name)
 
     # Mouse state (set by callback, consumed in main loop)
     mouse_state: dict = {"x": cross_x, "y": cross_y,
@@ -317,9 +289,7 @@ def run(frame: np.ndarray,
                 # drop the flag once the window becomes mapped, which is
                 # why the multi-camera feed does the same thing.
                 try:
-                    cv2.setWindowProperty(window_name,
-                                          cv2.WND_PROP_FULLSCREEN,
-                                          cv2.WINDOW_FULLSCREEN)
+                    set_fullscreen(window_name)
                 except cv2.error:
                     pass
 

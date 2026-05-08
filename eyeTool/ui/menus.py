@@ -17,7 +17,8 @@ import numpy as np
 
 from core.camera import open_camera
 from core.config import get_config
-from core.display import check_display, select_display_menu
+from core.display import (check_display, create_fullscreen_window,
+                          select_display_menu, set_fullscreen)
 from detection.rknn_yolov8 import infer as rknn_infer
 from detection.pipeline import (Detector, FrameSource, MultiDetector,
                        overlay_detections, overlay_tile_detections)
@@ -42,6 +43,29 @@ detect_every_n = 1        # run NPU on every Nth captured frame
 use_multi_core = False    # use 3 NPU cores (round-robin)
 
 PERSON_CLASS_ID = 0       # COCO class index for "person"
+
+
+def _load_detection_settings() -> None:
+    """Load detection settings from config into module-level globals."""
+    global detection_enabled, detection_confidence, target_fps, detect_every_n, use_multi_core
+    cfg = get_config()
+    detection_enabled = bool(cfg.get("detection.enabled", True))
+    detection_confidence = float(cfg.get("detection.confidence", 0.5))
+    target_fps = int(cfg.get("detection.target_fps", 30))
+    detect_every_n = int(cfg.get("detection.detect_every_n", 1))
+    use_multi_core = bool(cfg.get("detection.use_multi_core", False))
+
+
+def _save_detection_settings() -> None:
+    """Save current detection settings to user_settings.json."""
+    global detection_enabled, detection_confidence, target_fps, detect_every_n, use_multi_core
+    cfg = get_config()
+    cfg.set("detection.enabled", detection_enabled)
+    cfg.set("detection.confidence", detection_confidence)
+    cfg.set("detection.target_fps", target_fps)
+    cfg.set("detection.detect_every_n", detect_every_n)
+    cfg.set("detection.use_multi_core", use_multi_core)
+    cfg.save_user()
 
 
 def _signal_handler(sig, frame):  # noqa: ARG001
@@ -134,7 +158,7 @@ def load_camera_feed(source: int | str) -> None:
                             use_multi_core=use_multi_core)
         detector.start()
 
-    cv2.namedWindow("eyeTool - Camera Feed", cv2.WINDOW_NORMAL)
+    create_fullscreen_window("eyeTool - Camera Feed")
     first_frame = True
     frame_interval = 1.0 / target_fps if target_fps > 0 else 0
     prev_time = time.monotonic()
@@ -180,12 +204,11 @@ def load_camera_feed(source: int | str) -> None:
                 last_stats_ts = now
 
             cv2.imshow("eyeTool - Camera Feed", frame_letterboxed)
-            if first_frame:
-                cv2.setWindowProperty("eyeTool - Camera Feed",
-                                      cv2.WND_PROP_FULLSCREEN,
-                                      cv2.WINDOW_FULLSCREEN)
-                first_frame = False
-            # Aggressive: removed repeated fullscreen property setting for speed
+            try:
+                set_fullscreen("eyeTool - Camera Feed")
+            except cv2.error:
+                pass
+            first_frame = False
 
             # Aggressive: no frame rate limiting - always wait 1ms for display refresh
             key = cv2.waitKey(1) & 0xFF
@@ -226,7 +249,11 @@ def capture_single_image(source: int | str, output: str) -> None:
                 print("Error: Could not read frame.")
                 break
 
-            cv2.imshow("eyeTool - Capture Mode", frame)
+            from core.camera import get_display_resolution
+            display_w, display_h = get_display_resolution()
+            frame_display = letterbox_frame(frame, display_w, display_h)
+            cv2.imshow("eyeTool - Capture Mode", frame_display)
+            set_fullscreen("eyeTool - Capture Mode")
             key = cv2.waitKey(1) & 0xFF
             if key == ord(" "):
                 if cv2.imwrite(output, frame):
@@ -505,12 +532,32 @@ def load_multi_camera_feed() -> None:
     _target_fps = int(cfg.get("display.target_fps", 30))
     watchdog = float(cfg.get("streams.watchdog_stall_s", 2.0))
 
+    # Load camera mapping from config (device path -> position)
+    camera_mapping = {
+        0: cfg.get("camera_mapping.top_left", None),
+        1: cfg.get("camera_mapping.top_right", None),
+        2: cfg.get("camera_mapping.bottom_left", None),
+        3: cfg.get("camera_mapping.bottom_right", None),
+    }
+
     # Restore saved port_path -> slot_id bindings from zones.json
     saved_bindings: dict[str, int] = {}
     for sid, slot_cfg in cfg.all_slots().items():
         pp = slot_cfg.get("port_path")
         if pp:
             saved_bindings[pp] = sid
+
+    # Apply camera mapping if configured
+    # We need to convert device paths to port paths by enumerating cameras
+    from core.hotplug import list_cameras
+    cameras = list_cameras()
+    devnode_to_portpath = {cam.devnode: cam.port_path for cam in cameras}
+    
+    for slot_id, device_path in camera_mapping.items():
+        if device_path and device_path in devnode_to_portpath:
+            port_path = devnode_to_portpath[device_path]
+            saved_bindings[port_path] = slot_id
+            print(f"[camera mapping] slot {slot_id} <- {device_path} (port: {port_path})")
 
     # Live binding-change persistence: a fresh hot-plug into an empty slot
     # also triggers this, so zones.json always reflects "what plugged in
@@ -629,8 +676,7 @@ def load_multi_camera_feed() -> None:
     print(f"Detection: {det_status}  |  conf: {detection_confidence}  |  every-N: {detect_every_n}  |  NPU: {multi_status}")
     print("Press 'q'/ESC on the window, or Ctrl+C here to quit.")
 
-    cv2.namedWindow("eyeTool - Multi Feed", cv2.WINDOW_NORMAL)
-    cv2.moveWindow("eyeTool - Multi Feed", 800, 0)  # Position on HDMI display
+    create_fullscreen_window("eyeTool - Multi Feed")
     first_frame = True
     last_stats_ts = time.monotonic()
     frame_interval = 1.0 / _target_fps if _target_fps > 0 else 0.0
@@ -740,9 +786,7 @@ def load_multi_camera_feed() -> None:
                     last_stats_ts = now
 
                 cv2.imshow("eyeTool - Multi Feed", canvas)
-                cv2.setWindowProperty("eyeTool - Multi Feed",
-                                      cv2.WND_PROP_FULLSCREEN,
-                                      cv2.WINDOW_FULLSCREEN)
+                set_fullscreen("eyeTool - Multi Feed")
                 first_frame = False
 
                 # Frame rate limiting: calculate wait time to achieve target FPS
@@ -762,8 +806,7 @@ def load_multi_camera_feed() -> None:
                     if window_visible < 0.5:  # More lenient threshold
                         print(f"Window visibility check failed: {window_visible}, attempting to recreate window")
                         # Try to recreate the window instead of exiting
-                        cv2.namedWindow("eyeTool - Multi Feed", cv2.WINDOW_NORMAL)
-                        cv2.setWindowProperty("eyeTool - Multi Feed", cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+                        create_fullscreen_window("eyeTool - Multi Feed")
                 except Exception as e:
                     print(f"[ERROR] Window visibility check failed: {e}")
                     # Don't exit on window check errors in monitoring mode
@@ -1168,17 +1211,30 @@ def setup_zone_for_slot(slot_id: int) -> bool:
 
     cfg = get_config()
     slot_cfg = cfg.slot(slot_id) or {}
+    
+    # Load camera mapping from config (device path -> position)
+    camera_mapping = {
+        0: cfg.get("camera_mapping.top_left", None),
+        1: cfg.get("camera_mapping.top_right", None),
+        2: cfg.get("camera_mapping.bottom_left", None),
+        3: cfg.get("camera_mapping.bottom_right", None),
+    }
+    
+    # Check camera mapping first, then fall back to port_path
+    device_path = camera_mapping.get(slot_id)
     port_path = slot_cfg.get("port_path")
-    if not port_path:
-        print(f"Slot {slot_id}: no camera bound. Use the multi-camera feed "
-              f"first to bind a USB port to this slot.")
-        return False
-
-    cams = {c.port_path: c for c in list_cameras()}
-    info = cams.get(port_path)
-    if info is None:
-        print(f"Slot {slot_id}: camera at {port_path} is not connected. "
-              f"Plug it in and try again.")
+    
+    cams_by_port = {c.port_path: c for c in list_cameras()}
+    cams_by_devnode = {c.devnode: c for c in list_cameras()}
+    
+    info = None
+    if device_path and device_path in cams_by_devnode:
+        info = cams_by_devnode[device_path]
+    elif port_path and port_path in cams_by_port:
+        info = cams_by_port[port_path]
+    else:
+        print(f"Slot {slot_id}: no camera bound. Use the camera mapping "
+              f"or run multi-camera feed first to bind a camera to this slot.")
         return False
 
     print(f"Slot {slot_id}: opening live feed on {info.devnode} ...")
@@ -1247,15 +1303,30 @@ def setup_preprocess_for_slot(slot_id: int) -> bool:
 
     cfg = get_config()
     slot_cfg = cfg.slot(slot_id) or {}
+    
+    # Load camera mapping from config (device path -> position)
+    camera_mapping = {
+        0: cfg.get("camera_mapping.top_left", None),
+        1: cfg.get("camera_mapping.top_right", None),
+        2: cfg.get("camera_mapping.bottom_left", None),
+        3: cfg.get("camera_mapping.bottom_right", None),
+    }
+    
+    # Check camera mapping first, then fall back to port_path
+    device_path = camera_mapping.get(slot_id)
     port_path = slot_cfg.get("port_path")
-    if not port_path:
-        print(f"Slot {slot_id}: no camera bound; run multi-camera feed "
-              f"first to bind a USB port to this slot.")
-        return False
-    cams = {c.port_path: c for c in list_cameras()}
-    info = cams.get(port_path)
-    if info is None:
-        print(f"Slot {slot_id}: camera at {port_path} not connected.")
+    
+    cams_by_port = {c.port_path: c for c in list_cameras()}
+    cams_by_devnode = {c.devnode: c for c in list_cameras()}
+    
+    info = None
+    if device_path and device_path in cams_by_devnode:
+        info = cams_by_devnode[device_path]
+    elif port_path and port_path in cams_by_port:
+        info = cams_by_port[port_path]
+    else:
+        print(f"Slot {slot_id}: no camera bound. Use the camera mapping "
+              f"or run multi-camera feed first to bind a camera to this slot.")
         return False
 
     print(f"Slot {slot_id}: opening live feed on {info.devnode} ...")
@@ -1350,6 +1421,8 @@ def detection_settings_menu() -> None:
             print("  3-CORE: round-robin across NPU_CORE_0/1/2 (~3× detection rate)")
             print("  1-CORE: single NPU_CORE_AUTO (lower power, ~10 Hz detect)")
         elif raw == "6":
+            _save_detection_settings()
+            print("Detection settings saved to user_settings.json")
             break
         else:
             print("Invalid choice.")
@@ -1358,9 +1431,25 @@ def detection_settings_menu() -> None:
 def preprocess_settings_menu() -> None:
     cfg = get_config()
     max_streams = int(cfg.get("streams.max_streams", 4))
+    
+    # Load camera mapping from config (device path -> position)
+    camera_mapping = {
+        0: cfg.get("camera_mapping.top_left", None),
+        1: cfg.get("camera_mapping.top_right", None),
+        2: cfg.get("camera_mapping.bottom_left", None),
+        3: cfg.get("camera_mapping.bottom_right", None),
+    }
+    
+    # Create device path -> slot mapping from camera_mapping
+    devnode_to_slot = {}
+    for slot_id, device_path in camera_mapping.items():
+        if device_path:
+            devnode_to_slot[device_path] = slot_id
+    
     while True:
         from core.hotplug import list_cameras
         connected = {c.port_path: c for c in list_cameras()}
+        connected_by_devnode = {c.devnode: c for c in list_cameras()}
 
         print("\n=== Image preprocessing ===")
         any_bound = False
@@ -1368,17 +1457,35 @@ def preprocess_settings_menu() -> None:
             slot_cfg = cfg.slot(sid) or {}
             pp = slot_cfg.get("port_path", "")
             cam = connected.get(pp)
-            state = "(no camera bound)" if not pp else (
-                f"{cam.model or 'connected'} -> {cam.devnode}"
-                if cam else "BOUND but UNAVAILABLE")
+            
+            # Also check camera mapping for device path binding
+            device_path = camera_mapping.get(sid)
+            if device_path and device_path in connected_by_devnode:
+                cam = connected_by_devnode[device_path]
+                state = f"{cam.model or 'connected'} -> {cam.devnode}"
+            elif not pp:
+                state = "(no camera bound)"
+            else:
+                state = (f"{cam.model or 'connected'} -> {cam.devnode}"
+                        if cam else "BOUND but UNAVAILABLE")
+            
             pre = slot_cfg.get("preprocessing") or {}
-            pre_state = ("default" if not pre else
-                         f"B={pre.get('brightness', 0):+.2f} "
-                         f"C={pre.get('contrast', 1):.2f} "
-                         f"S={pre.get('saturation', 1):.2f} "
-                         f"G={pre.get('gamma', 1):.2f}")
+            if not pre:
+                pre_state = "default"
+            else:
+                flip_h = "H" if pre.get('flip_h', False) else ""
+                flip_v = "V" if pre.get('flip_v', False) else ""
+                rot = pre.get('rotate', 0)
+                rot_str = f"{rot:+}°" if rot != 0 else ""
+                transforms = " ".join(filter(None, [flip_h, flip_v, rot_str]))
+                pre_state = (f"B={pre.get('brightness', 0):+.2f} "
+                             f"C={pre.get('contrast', 1):.2f} "
+                             f"S={pre.get('saturation', 1):.2f} "
+                             f"G={pre.get('gamma', 1):.2f}")
+                if transforms:
+                    pre_state += f" [{transforms}]"
             print(f"  {sid}.  {state:42}  [{pre_state}]")
-            if pp:
+            if pp or device_path:
                 any_bound = True
         if not any_bound:
             print("  -- no slots bound yet. Run option 2 first. --")
@@ -1525,10 +1632,19 @@ def setup_zones_menu() -> None:
     """Top-level slot picker for zone setup."""
     cfg = get_config()
     max_streams = int(cfg.get("streams.max_streams", 4))
+    
+    # Load camera mapping from config (device path -> position)
+    camera_mapping = {
+        0: cfg.get("camera_mapping.top_left", None),
+        1: cfg.get("camera_mapping.top_right", None),
+        2: cfg.get("camera_mapping.bottom_left", None),
+        3: cfg.get("camera_mapping.bottom_right", None),
+    }
 
     while True:
         from core.hotplug import list_cameras
         connected = {c.port_path: c for c in list_cameras()}
+        connected_by_devnode = {c.devnode: c for c in list_cameras()}
 
         print("\n=== Setup alarm zones ===")
         any_bound = False
@@ -1537,12 +1653,21 @@ def setup_zones_menu() -> None:
             pp = slot_cfg.get("port_path", "")
             poly = slot_cfg.get("polygon") or []
             cam = connected.get(pp)
-            state = "(no camera bound)" if not pp else (
-                f"{cam.model or 'connected'} -> {cam.devnode}"
-                if cam else "BOUND but UNAVAILABLE (plug in)")
+            
+            # Also check camera mapping for device path binding
+            device_path = camera_mapping.get(sid)
+            if device_path and device_path in connected_by_devnode:
+                cam = connected_by_devnode[device_path]
+                state = f"{cam.model or 'connected'} -> {cam.devnode}"
+            elif not pp:
+                state = "(no camera bound)"
+            else:
+                state = (f"{cam.model or 'connected'} -> {cam.devnode}"
+                        if cam else "BOUND but UNAVAILABLE (plug in)")
+            
             poly_state = f"{len(poly)} verts" if poly else "no polygon"
             print(f"  {sid}.  {state:42}  [{poly_state}]")
-            if pp:
+            if pp or device_path:
                 any_bound = True
         if not any_bound:
             print("  -- no slots bound yet. Run option 2 (Multi-camera "
@@ -1564,6 +1689,9 @@ def setup_zones_menu() -> None:
 
 
 def interactive_menu(source: int | str, output: str) -> None:
+    # Load detection settings from config at startup
+    _load_detection_settings()
+
     while True:
         print("\n=== eyeTool - Camera Application ===")
         print(f"Camera source: {source}")
@@ -1615,9 +1743,78 @@ def interactive_menu(source: int | str, output: str) -> None:
             print("Invalid choice. Please enter 1-12.")
 
 
+def camera_mapping_menu(cameras: list[str]) -> None:
+    """Interactive menu for mapping cameras to multi-feed screen positions."""
+    cfg = get_config()
+    
+    # Load current mapping
+    mapping = {
+        "a": cfg.get("camera_mapping.top_left", None),
+        "b": cfg.get("camera_mapping.top_right", None),
+        "c": cfg.get("camera_mapping.bottom_left", None),
+        "d": cfg.get("camera_mapping.bottom_right", None),
+    }
+    
+    position_names = {
+        "a": "Top-Left",
+        "b": "Top-Right",
+        "c": "Bottom-Left",
+        "d": "Bottom-Right",
+    }
+    
+    while True:
+        print("\n___Multi-camera feed screen mapping___")
+        
+        # Display current mapping
+        for pos, name in position_names.items():
+            camera = mapping[pos]
+            if camera:
+                # Find the index of the camera in the available list
+                try:
+                    idx = cameras.index(camera) + 1
+                    camera_display = f"/dev/video{camera.split('video')[1]} (index {idx})"
+                except (ValueError, IndexError):
+                    camera_display = camera
+                print(f"{pos}. {name}:  {camera_display}")
+            else:
+                print(f"{pos}. {name}:  **unmapped**")
+        
+        print("\nFeed Available Cameras:")
+        for i, camera in enumerate(cameras, 1):
+            print(f"  {i}. {camera}")
+        
+        print('\nPress "q" to return main menu.')
+        cmd = input('Enter your mapping command (e.g. a3 means feeding /dev/video24 to Top-left split screen)\nYour command: ').strip().lower()
+        
+        if cmd == "q":
+            # Save mapping before returning
+            cfg.set("camera_mapping.top_left", mapping["a"])
+            cfg.set("camera_mapping.top_right", mapping["b"])
+            cfg.set("camera_mapping.bottom_left", mapping["c"])
+            cfg.set("camera_mapping.bottom_right", mapping["d"])
+            cfg.save_user()
+            print("Mapping saved to user_settings.json")
+            return
+        
+        # Parse command (e.g., "a3" means map camera 3 to position a)
+        if len(cmd) >= 2 and cmd[0] in position_names:
+            pos = cmd[0]
+            try:
+                camera_idx = int(cmd[1:]) - 1
+                if 0 <= camera_idx < len(cameras):
+                    mapping[pos] = cameras[camera_idx]
+                    print(f"Mapped {cameras[camera_idx]} to {position_names[pos]}")
+                else:
+                    print(f"Invalid camera index. Please enter 1-{len(cameras)}")
+            except ValueError:
+                print("Invalid command format. Use format like 'a3' (position + camera number)")
+        else:
+            print("Invalid command. Use format like 'a3' (position + camera number)")
+
+
 def select_camera_for_feed() -> None:
     """Select camera for live feed by probing all available cameras."""
-    print("\n--- Select a Camera for Live Feed ---")
+    print("\n--- Select a Mode to Proceed ---")
     
     from core.camera import find_all_cameras, test_camera, resolve_camera_source
     
@@ -1635,21 +1832,26 @@ def select_camera_for_feed() -> None:
         load_camera_feed(source)
         return
     
-    # Display working cameras
-    print("\nAvailable cameras:")
+    # Show submenu
+    print("\n 0. Camera Mapping Multi-camera Feed")
+    print("\nFeed Available Cameras:")
     for i, camera in enumerate(working_cameras, 1):
         print(f"  {i}. {camera}")
     
     while True:
-        try:
-            choice = input(f"\nEnter choice (1-{len(working_cameras)}): ").strip()
+        choice = input(f"\nEnter choice (0-{len(working_cameras)}): ").strip()
+        
+        if choice == "0":
+            camera_mapping_menu(working_cameras)
+            return
+        elif choice.isdigit():
             idx = int(choice) - 1
             if 0 <= idx < len(working_cameras):
                 selected_camera = working_cameras[idx]
                 print(f"Selected: {selected_camera}")
                 load_camera_feed(selected_camera)
-                break
+                return
             else:
                 print("Invalid choice. Please try again.")
-        except ValueError:
+        else:
             print("Please enter a number.")

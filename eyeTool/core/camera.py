@@ -9,16 +9,11 @@ import os
 import re
 import subprocess
 
-from utils.external_logging import configure_opencv_logging, redirect_external
-
-with redirect_external("opencv"):
-    import cv2
+import cv2
 
 DEFAULT_CAMERA_SYMLINK = "/dev/video-camera0"
 
 _MJPEG_BONUS: float = 3.0
-
-configure_opencv_logging()
 
 
 def get_best_resolution(device_path: str) -> tuple[int, int, float, str] | None:
@@ -141,14 +136,13 @@ def test_camera(device: str) -> bool:
     Returns True if the camera is working, False otherwise.
     """
     try:
-        with redirect_external("opencv"):
-            cap = cv2.VideoCapture(device, cv2.CAP_V4L2)
-            if not cap.isOpened():
-                return False
-            
-            ret, frame = cap.read()
-            cap.release()
-            return ret and frame is not None
+        cap = cv2.VideoCapture(device, cv2.CAP_V4L2)
+        if not cap.isOpened():
+            return False
+        
+        ret, frame = cap.read()
+        cap.release()
+        return ret and frame is not None
     except Exception:
         return False
 
@@ -192,29 +186,8 @@ def get_display_resolution() -> tuple[int, int]:
     Returns (width, height) or (800, 480) as fallback for built-in LCD.
     Always returns landscape orientation (width > height).
     """
-    try:
-        import subprocess
-        result = subprocess.run(
-            ["xrandr"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        for line in result.stdout.splitlines():
-            if "*" in line and "connected" in result.stdout.splitlines()[result.stdout.splitlines().index(line) - 1]:
-                # Parse resolution from line like "   1920x1080     60.00*"
-                parts = line.split()
-                if parts:
-                    res = parts[0]
-                    if "x" in res:
-                        w, h = map(int, res.split("x"))
-                        # Ensure landscape orientation (width > height)
-                        if h > w:
-                            w, h = h, w
-                        return w, h
-    except (FileNotFoundError, subprocess.TimeoutExpired, ValueError, IndexError):
-        pass
-    return 800, 480  # Fallback to built-in LCD resolution (landscape)
+    from core.display import get_display_resolution as _get_display_resolution
+    return _get_display_resolution()
 
 
 def open_camera(source: int | str) -> cv2.VideoCapture | None:
@@ -229,8 +202,7 @@ def open_camera(source: int | str) -> cv2.VideoCapture | None:
     Resolution is auto-selected to be at least double the display size
     for better quality, while maintaining high frame rate.
     """
-    with redirect_external("opencv"):
-        cap = cv2.VideoCapture(source, cv2.CAP_V4L2)
+    cap = cv2.VideoCapture(source, cv2.CAP_V4L2)
     # Increase buffer size to allow camera to deliver frames faster
     # Setting to 1 can cause camera to stall on some devices
     # Buffer size 2 provides 33ms latency at 30fps while maintaining throughput
@@ -268,14 +240,10 @@ def open_camera(source: int | str) -> cv2.VideoCapture | None:
             
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
-            # Try to force 60fps explicitly
-            cap.set(cv2.CAP_PROP_FPS, 60.0)
+            cap.set(cv2.CAP_PROP_FPS, fps)
             if fmt == "MJPG":
                 cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-            # Disable auto-exposure for higher FPS
-            cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)  # Manual exposure mode
-            cap.set(cv2.CAP_PROP_EXPOSURE, 100)  # Fixed exposure value
-            print(f"Auto-selected: {w}x{h} @ 60 fps forced ({fmt}) for '{device_path}' (exposure disabled for max FPS)")
+            print(f"Auto-selected: {w}x{h} @ {fps:.0f} fps ({fmt}) for '{device_path}'")
             print(f"Display resolution: {display_w}x{display_h}")
 
     return cap

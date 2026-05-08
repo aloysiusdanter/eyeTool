@@ -1,17 +1,23 @@
-"""Live brightness/contrast/saturation/gamma editor for one camera.
+"""Live brightness/contrast/saturation/gamma/flip/rotation editor for one camera.
 
 Renders an SSH-friendly fullscreen view that shows the current camera
 frame **as the detector will see it** (i.e. with the live preprocessing
-applied) plus a sidebar panel of the four sliders. Keys:
+applied) plus a sidebar panel of the controls. Keys:
 
-    1 / 2 / 3 / 4   select Brightness / Contrast / Saturation / Gamma
-    UP / DOWN       same as 1..4 (cycle through parameters)
-    LEFT / -        decrement the selected parameter by one step
-    RIGHT / +       increment the selected parameter by one step
-    R               reset selected parameter to its neutral value
-    A               reset ALL parameters
-    S / ENTER       save and exit
-    Q / ESC         cancel and exit (no changes saved)
+    1 / 2 / 3 / 4 / 5 / 6 / 7   select parameter
+    UP / DOWN                   cycle through parameters
+    LEFT / -                    decrement the selected parameter
+    RIGHT / +                   increment the selected parameter
+    SPACE                       toggle boolean parameters (Flip H/V)
+    R                           reset selected parameter to neutral
+    A                           reset ALL parameters
+    S / ENTER                   save and exit
+    Q / ESC                     cancel and exit (no changes saved)
+
+Parameters:
+    1. Brightness  2. Contrast  3. Saturation  4. Gamma
+    5. Flip H      6. Flip V   7. Rotate (-180 to +180 degrees, 1-degree steps)
+                                (negative = counter-clockwise, positive = clockwise)
 
 Driven by stdin in cbreak mode (works over plain SSH) and by the cv2
 window when it has X11 keyboard focus, sharing the same dispatcher.
@@ -27,7 +33,7 @@ import cv2
 import numpy as np
 
 from preprocessing.preprocess import (BRIGHTNESS_RANGE, CONTRAST_RANGE, GAMMA_RANGE,
-                        SATURATION_RANGE, Preprocess)
+                        ROTATION_RANGE, SATURATION_RANGE, Preprocess)
 from utils.terminal_input import RawStdin, normalise_cv2_key
 
 # UI constants
@@ -41,12 +47,16 @@ _BAR_FILL = (71, 179, 255)
 _BAR_TRACK = (60, 60, 60)
 
 
-# (label, attr, range, step, neutral, neutral_keys)
+# (label, attr, range, step, neutral, neutral_keys, type)
+# type: 'float' for sliders, 'bool' for toggle, 'int' for rotation
 _PARAMS = [
-    ("Brightness", "brightness", BRIGHTNESS_RANGE, 0.05, 0.0),
-    ("Contrast",   "contrast",   CONTRAST_RANGE,   0.05, 1.0),
-    ("Saturation", "saturation", SATURATION_RANGE, 0.05, 1.0),
-    ("Gamma",      "gamma",      GAMMA_RANGE,      0.05, 1.0),
+    ("Brightness", "brightness", BRIGHTNESS_RANGE, 0.05, 0.0, 'float'),
+    ("Contrast",   "contrast",   CONTRAST_RANGE,   0.05, 1.0, 'float'),
+    ("Saturation", "saturation", SATURATION_RANGE, 0.05, 1.0, 'float'),
+    ("Gamma",      "gamma",      GAMMA_RANGE,      0.05, 1.0, 'float'),
+    ("Flip H",     "flip_h",     None,             None,  False, 'bool'),
+    ("Flip V",     "flip_v",     None,             None,  False, 'bool'),
+    ("Rotate",     "rotate",     ROTATION_RANGE,   1,    0,     'int'),
 ]
 
 
@@ -78,7 +88,7 @@ def _letterbox_into(canvas: np.ndarray, frame: np.ndarray,
     canvas[oy:oy + new_h, ox:ox + new_w] = resized
 
 
-def _draw_panel(canvas: np.ndarray, panel_x: int, params_state: list[float],
+def _draw_panel(canvas: np.ndarray, panel_x: int, params_state: list,
                 selected: int, slot_label: str, dirty: bool,
                 status: str) -> None:
     """Render the right-side parameter panel in-place onto *canvas*."""
@@ -96,36 +106,64 @@ def _draw_panel(canvas: np.ndarray, panel_x: int, params_state: list[float],
     panel_w = w - panel_x
     bar_w = panel_w - 32
     bar_x0 = panel_x + 16
-    for i, (label, _attr, (lo, hi), _step, _neutral) in enumerate(_PARAMS):
+    for i, (label, _attr, range_tuple, _step, _neutral, param_type) in enumerate(_PARAMS):
         val = params_state[i]
         sel = (i == selected)
         color = _HIGHLIGHT if sel else _TEXT
         prefix = "*" if sel else " "
         cv2.putText(canvas, f"{prefix} {i + 1}. {label}",
                     (panel_x + 12, y), _FONT, 0.5, color, 1, cv2.LINE_AA)
-        cv2.putText(canvas, f"{val:+.2f}",
-                    (panel_x + panel_w - 76, y), _FONT, 0.5, color, 1,
-                    cv2.LINE_AA)
-        # bar
-        track_y = y + 14
-        cv2.rectangle(canvas, (bar_x0, track_y),
-                      (bar_x0 + bar_w, track_y + 8), _BAR_TRACK, -1)
-        ratio = (val - lo) / (hi - lo) if hi > lo else 0.0
-        ratio = max(0.0, min(1.0, ratio))
-        fill_x = bar_x0 + int(round(ratio * bar_w))
-        cv2.rectangle(canvas, (bar_x0, track_y),
-                      (fill_x, track_y + 8), _BAR_FILL, -1)
-        # neutral tick
-        neutral_ratio = (_neutral - lo) / (hi - lo) if hi > lo else 0.5
-        tick_x = bar_x0 + int(round(neutral_ratio * bar_w))
-        cv2.line(canvas, (tick_x, track_y - 2),
-                 (tick_x, track_y + 10), _TEXT_DIM, 1)
+
+        if param_type == 'bool':
+            # Toggle display: ON/OFF
+            val_str = "ON" if val else "OFF"
+            cv2.putText(canvas, f"{val_str}",
+                        (panel_x + panel_w - 76, y), _FONT, 0.5, color, 1,
+                        cv2.LINE_AA)
+        elif param_type == 'int':
+            # Rotation display: -180 to +180 degrees (negative = CCW, positive = CW)
+            cv2.putText(canvas, f"{val:+}°",
+                        (panel_x + panel_w - 76, y), _FONT, 0.5, color, 1,
+                        cv2.LINE_AA)
+            # bar for rotation
+            if range_tuple:
+                lo, hi = range_tuple
+                track_y = y + 14
+                cv2.rectangle(canvas, (bar_x0, track_y),
+                              (bar_x0 + bar_w, track_y + 8), _BAR_TRACK, -1)
+                ratio = (val - lo) / (hi - lo) if hi > lo else 0.0
+                ratio = max(0.0, min(1.0, ratio))
+                fill_x = bar_x0 + int(round(ratio * bar_w))
+                cv2.rectangle(canvas, (bar_x0, track_y),
+                              (fill_x, track_y + 8), _BAR_FILL, -1)
+        else:
+            # Float slider display
+            cv2.putText(canvas, f"{val:+.2f}",
+                        (panel_x + panel_w - 76, y), _FONT, 0.5, color, 1,
+                        cv2.LINE_AA)
+            # bar
+            if range_tuple:
+                lo, hi = range_tuple
+                track_y = y + 14
+                cv2.rectangle(canvas, (bar_x0, track_y),
+                              (bar_x0 + bar_w, track_y + 8), _BAR_TRACK, -1)
+                ratio = (val - lo) / (hi - lo) if hi > lo else 0.0
+                ratio = max(0.0, min(1.0, ratio))
+                fill_x = bar_x0 + int(round(ratio * bar_w))
+                cv2.rectangle(canvas, (bar_x0, track_y),
+                              (fill_x, track_y + 8), _BAR_FILL, -1)
+                # neutral tick
+                neutral_ratio = (_neutral - lo) / (hi - lo) if hi > lo else 0.5
+                tick_x = bar_x0 + int(round(neutral_ratio * bar_w))
+                cv2.line(canvas, (tick_x, track_y - 2),
+                         (tick_x, track_y + 10), _TEXT_DIM, 1)
         y += 50
 
     # Help footer (panel-bottom)
     help_lines = [
-        "1-4 / UP DN  select",
+        "1-7 / UP DN  select",
         "+/-  LEFT/RT  adjust",
+        "SPACE toggle (bool)",
         "R reset one  A reset all",
         "S/ENTER save  Q cancel",
     ]
@@ -154,10 +192,10 @@ def run(cap: "cv2.VideoCapture", initial: Preprocess | None = None,
         canvas_h = canvas_h or sh
 
     if initial is None:
-        params = [neutral for _, _, _, _, neutral in _PARAMS]
+        params = [neutral for _, _, _, _, neutral, _type in _PARAMS]
     else:
         params = [getattr(initial, attr)
-                  for _label, attr, _r, _s, _n in _PARAMS]
+                  for _label, attr, _r, _s, _n, _type in _PARAMS]
     selected = 0
     dirty = False
     status = ""
@@ -165,10 +203,8 @@ def run(cap: "cv2.VideoCapture", initial: Preprocess | None = None,
     panel_w = max(220, canvas_w // 4)
     image_x1 = canvas_w - panel_w
 
-    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
-    cv2.moveWindow(window_name, 800, 0)  # Position on HDMI display
-    cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN,
-                          cv2.WINDOW_FULLSCREEN)
+    from core.display import create_fullscreen_window, set_fullscreen
+    create_fullscreen_window(window_name)
 
     if cv2.getWindowProperty(window_name, cv2.WND_PROP_VISIBLE) >= 1 \
             or True:  # always print -- helpful over SSH
@@ -183,7 +219,8 @@ def run(cap: "cv2.VideoCapture", initial: Preprocess | None = None,
 
     def _build_pp() -> Preprocess:
         return Preprocess(brightness=params[0], contrast=params[1],
-                          saturation=params[2], gamma=params[3])
+                          saturation=params[2], gamma=params[3],
+                          flip_h=params[4], flip_v=params[5], rotate=params[6])
 
     pp = _build_pp()
 
@@ -213,9 +250,7 @@ def run(cap: "cv2.VideoCapture", initial: Preprocess | None = None,
                             slot_label, dirty, stream_status)
                 cv2.imshow(window_name, canvas)
                 try:
-                    cv2.setWindowProperty(window_name,
-                                          cv2.WND_PROP_FULLSCREEN,
-                                          cv2.WINDOW_FULLSCREEN)
+                    set_fullscreen(window_name)
                 except cv2.error:
                     pass
 
@@ -229,29 +264,49 @@ def run(cap: "cv2.VideoCapture", initial: Preprocess | None = None,
                     continue
                 status = ""
 
-                if key in ("1", "2", "3", "4"):
+                if key in ("1", "2", "3", "4", "5", "6", "7"):
                     selected = int(key) - 1
                 elif key == "up":
                     selected = (selected - 1) % len(_PARAMS)
                 elif key == "down":
                     selected = (selected + 1) % len(_PARAMS)
                 elif key in ("plus", "right"):
-                    _label, _attr, (lo, hi), step, _n = _PARAMS[selected]
-                    params[selected] = max(lo, min(hi, params[selected] + step))
+                    _label, _attr, range_tuple, step, _n, param_type = _PARAMS[selected]
+                    if param_type == 'bool':
+                        params[selected] = not params[selected]
+                    elif param_type == 'int' and range_tuple:
+                        lo, hi = range_tuple
+                        params[selected] = max(lo, min(hi, params[selected] + step))
+                    elif range_tuple:
+                        lo, hi = range_tuple
+                        params[selected] = max(lo, min(hi, params[selected] + step))
                     dirty = True
                     pp = _build_pp()
                 elif key in ("minus", "left"):
-                    _label, _attr, (lo, hi), step, _n = _PARAMS[selected]
-                    params[selected] = max(lo, min(hi, params[selected] - step))
+                    _label, _attr, range_tuple, step, _n, param_type = _PARAMS[selected]
+                    if param_type == 'bool':
+                        params[selected] = not params[selected]
+                    elif param_type == 'int' and range_tuple:
+                        lo, hi = range_tuple
+                        params[selected] = max(lo, min(hi, params[selected] - step))
+                    elif range_tuple:
+                        lo, hi = range_tuple
+                        params[selected] = max(lo, min(hi, params[selected] - step))
                     dirty = True
                     pp = _build_pp()
+                elif key == "space":
+                    _label, _attr, range_tuple, step, _n, param_type = _PARAMS[selected]
+                    if param_type == 'bool':
+                        params[selected] = not params[selected]
+                        dirty = True
+                        pp = _build_pp()
                 elif key == "r":
-                    _label, _attr, _r, _s, neutral = _PARAMS[selected]
+                    _label, _attr, range_tuple, _s, neutral, param_type = _PARAMS[selected]
                     params[selected] = neutral
                     dirty = True
                     pp = _build_pp()
                 elif key == "a":
-                    params = [neutral for _, _, _, _, neutral in _PARAMS]
+                    params = [neutral for _, _, _, _, neutral, _type in _PARAMS]
                     dirty = True
                     pp = _build_pp()
                 elif key in ("s", "enter"):

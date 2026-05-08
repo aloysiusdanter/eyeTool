@@ -1,5 +1,13 @@
 {
-  "display": {
-    "target": ":0"
+  "detection": {
+    "confidence": 0.65,
+    "use_multi_core": true,
+    "target_fps": 30
+  },
+  "camera_mapping": {
+    "top_left": "/dev/video20",
+    "top_right": "/dev/video22",
+    "bottom_left": "/dev/video24",
+    "bottom_right": "/dev/video26"
   }
 }

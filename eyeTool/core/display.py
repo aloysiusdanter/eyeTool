@@ -11,9 +11,18 @@ from __future__ import annotations
 
 import glob
 import os
+import re
 import subprocess
 
 from core.config import get_config
+
+
+def _display_index(display: str | None = None) -> int | None:
+    raw = display if display is not None else os.environ.get("DISPLAY", "")
+    m = re.search(r":(\d+)", raw or "")
+    if not m:
+        return None
+    return int(m.group(1))
 
 
 def detect_x_displays() -> list[str]:
@@ -80,6 +89,38 @@ def set_display(display: str) -> None:
             os.environ["XAUTHORITY"] = mutter_files[0]
 
 
+def _can_query_display(display: str) -> bool:
+    old_display = os.environ.get("DISPLAY")
+    old_xauthority = os.environ.get("XAUTHORITY")
+    set_display(display)
+    try:
+        result = subprocess.run(
+            ["xrandr", "--query"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        return result.returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return False
+    finally:
+        if old_display is None:
+            os.environ.pop("DISPLAY", None)
+        else:
+            os.environ["DISPLAY"] = old_display
+        if old_xauthority is None:
+            os.environ.pop("XAUTHORITY", None)
+        else:
+            os.environ["XAUTHORITY"] = old_xauthority
+
+
+def _choose_usable_display(candidates: list[str]) -> str | None:
+    for display in candidates:
+        if _can_query_display(display):
+            return display
+    return None
+
+
 def auto_set_display() -> str | None:
     """Choose a DISPLAY for this run.
 
@@ -98,25 +139,26 @@ def auto_set_display() -> str | None:
         saved = (get_config().get("display.target", "") or "").strip()
     except Exception:  # noqa: BLE001 -- config init should never fail us here
         saved = ""
+    available = detect_x_displays()
     if saved:
-        available = detect_x_displays()
-        if not available or saved in available:
+        if saved in available and _can_query_display(saved):
             set_display(saved)
             print(f"Display target: {saved} (saved preference)")
             return saved
-        print(f"[main] saved display preference {saved!r} not present "
-              f"on this system; available={available}; falling back")
+        print(f"[main] saved display preference {saved!r} is not usable; "
+              f"available={available}; falling back")
 
     # 2. environment DISPLAY (if saved preference not set or invalid)
-    if os.environ.get("DISPLAY"):
-        print(f"Using environment DISPLAY: {os.environ['DISPLAY']}")
+    env_display = os.environ.get("DISPLAY")
+    if env_display and _can_query_display(env_display):
+        set_display(env_display)
+        print(f"Using environment DISPLAY: {env_display}")
         return None
 
     # 3. first detected socket
-    displays = detect_x_displays()
-    if not displays:
+    chosen = _choose_usable_display(available)
+    if chosen is None:
         return None
-    chosen = displays[0]
     set_display(chosen)
     print(f"Auto-detected display: {chosen} "
           f"(use menu option 9 or --display to change)")
@@ -182,6 +224,87 @@ def select_display_menu() -> None:
         cfg.save_user()
         print(f"Saved: future launches will use {chosen} unless overridden "
               f"by --display.")
+
+
+def get_display_geometry(default: tuple[int, int, int, int] = (0, 0, 800, 480)
+                         ) -> tuple[int, int, int, int]:
+    """Return ``(x, y, width, height)`` for the selected monitor output."""
+    if not os.environ.get("DISPLAY"):
+        return default
+    try:
+        result = subprocess.run(
+            ["xrandr", "--query"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return default
+    if result.returncode != 0:
+        return default
+
+    outputs: list[dict[str, object]] = []
+    for line in result.stdout.splitlines():
+        if line and not line.startswith((" ", "\t")):
+            parts = line.split()
+            if len(parts) < 2 or parts[1] != "connected":
+                continue
+            m = re.search(r"\b(\d+)x(\d+)\+(\d+)\+(\d+)\b", line)
+            if not m:
+                continue
+            outputs.append({
+                "name": parts[0],
+                "primary": " primary " in f" {line} ",
+                "width": int(m.group(1)),
+                "height": int(m.group(2)),
+                "x": int(m.group(3)),
+                "y": int(m.group(4)),
+            })
+
+    if not outputs:
+        m = re.search(r"current\s+(\d+)\s*x\s*(\d+)", result.stdout)
+        if m:
+            return 0, 0, int(m.group(1)), int(m.group(2))
+        return default
+
+    display_idx = _display_index()
+    chosen = None
+    if display_idx == 1:
+        chosen = next((o for o in outputs if str(o["name"]).upper().startswith("HDMI")), None)
+    elif display_idx == 0:
+        chosen = next((o for o in outputs if bool(o["primary"])), None)
+        if chosen is None:
+            chosen = next((o for o in outputs if str(o["name"]).upper().startswith(("DSI", "LVDS", "EDP"))), None)
+    if chosen is None:
+        chosen = next((o for o in outputs if bool(o["primary"])), outputs[0])
+
+    return int(chosen["x"]), int(chosen["y"]), int(chosen["width"]), int(chosen["height"])
+
+
+def get_display_resolution(default: tuple[int, int] = (800, 480)) -> tuple[int, int]:
+    """Return the selected monitor resolution as ``(width, height)``."""
+    _x, _y, width, height = get_display_geometry((0, 0, default[0], default[1]))
+    return width, height
+
+
+def create_fullscreen_window(window_name: str) -> None:
+    import cv2
+
+    x, y, width, height = get_display_geometry()
+    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+    cv2.moveWindow(window_name, x, y)
+    cv2.resizeWindow(window_name, width, height)
+    set_fullscreen(window_name)
+
+
+def set_fullscreen(window_name: str) -> None:
+    import cv2
+
+    try:
+        cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN,
+                              cv2.WINDOW_FULLSCREEN)
+    except cv2.error:
+        pass
 
 
 def check_display() -> bool:
