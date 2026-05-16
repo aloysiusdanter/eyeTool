@@ -7,6 +7,7 @@ configuration, and interactive menu functions extracted from main.py.
 from __future__ import annotations
 
 import os
+import queue
 import signal
 import subprocess
 import threading
@@ -41,30 +42,44 @@ detection_confidence = 0.5
 target_fps = 30
 detect_every_n = 1        # run NPU on every Nth captured frame
 use_multi_core = False    # use 3 NPU cores (round-robin)
+low_latency_profile = False
+max_box_age_ms = 120
+zone_fill = True
 
 PERSON_CLASS_ID = 0       # COCO class index for "person"
 
 
 def _load_detection_settings() -> None:
     """Load detection settings from config into module-level globals."""
-    global detection_enabled, detection_confidence, target_fps, detect_every_n, use_multi_core
+    global detection_enabled, detection_confidence, target_fps
+    global detect_every_n, use_multi_core
+    global low_latency_profile, max_box_age_ms, zone_fill
     cfg = get_config()
     detection_enabled = bool(cfg.get("detection.enabled", True))
     detection_confidence = float(cfg.get("detection.confidence", 0.5))
     target_fps = int(cfg.get("detection.target_fps", 30))
     detect_every_n = int(cfg.get("detection.detect_every_n", 1))
     use_multi_core = bool(cfg.get("detection.use_multi_core", False))
+    low_latency_profile = bool(cfg.get("detection.low_latency_profile", False))
+    max_box_age_ms = int(cfg.get("detection.max_box_age_ms", 120))
+    max_box_age_ms = max(0, min(max_box_age_ms, 2000))
+    zone_fill = bool(cfg.get("detection.zone_fill", True))
 
 
 def _save_detection_settings() -> None:
     """Save current detection settings to user_settings.json."""
-    global detection_enabled, detection_confidence, target_fps, detect_every_n, use_multi_core
+    global detection_enabled, detection_confidence, target_fps
+    global detect_every_n, use_multi_core
+    global low_latency_profile, max_box_age_ms, zone_fill
     cfg = get_config()
     cfg.set("detection.enabled", detection_enabled)
     cfg.set("detection.confidence", detection_confidence)
     cfg.set("detection.target_fps", target_fps)
     cfg.set("detection.detect_every_n", detect_every_n)
     cfg.set("detection.use_multi_core", use_multi_core)
+    cfg.set("detection.low_latency_profile", low_latency_profile)
+    cfg.set("detection.max_box_age_ms", max_box_age_ms)
+    cfg.set("detection.zone_fill", zone_fill)
     cfg.save_user()
 
 
@@ -146,6 +161,8 @@ def load_camera_feed(source: int | str) -> None:
     print(f"Feed info: {w}x{h} @ {fps:.1f} fps (letterboxed to {display_w}x{display_h})  |  source: {source}  |  display: {os.environ.get('DISPLAY', '?')}")
     multi_status = "3-CORE" if use_multi_core else "1-CORE"
     print(f"Detection: {det_status}  |  confidence: {detection_confidence}  |  target FPS: {target_fps}  |  detect every N: {detect_every_n}  |  NPU: {multi_status}")
+    if low_latency_profile:
+        print(f"Low-latency profile: ON  |  stale box cutoff: {max_box_age_ms} ms")
     print("Press 'q'/ESC on the window, or Ctrl+C here to quit.")
 
     frame_source = FrameSource(cap)
@@ -161,11 +178,15 @@ def load_camera_feed(source: int | str) -> None:
     create_fullscreen_window("eyeTool - Camera Feed")
     first_frame = True
     frame_interval = 1.0 / target_fps if target_fps > 0 else 0
-    prev_time = time.monotonic()
+    last_present_ts = time.monotonic()
     actual_fps = 0.0
     last_stats_ts = time.monotonic()
+    max_box_age_s: float | None = None
+    if low_latency_profile and detection_enabled:
+        max_box_age_s = max_box_age_ms / 1000.0
     try:
         while not _quit_requested:
+            loop_start = time.monotonic()
             # Aggressive: poll instead of wait to avoid blocking
             snap = frame_source.get_latest()
             if snap is None:
@@ -176,10 +197,10 @@ def load_camera_feed(source: int | str) -> None:
             # Aggressive: skip frame copy for maximum speed (risky but fast)
             # frame = frame.copy()
 
-            now = time.monotonic()
+            now = loop_start
             if detector is not None:
                 det = detector.get_latest()
-                overlay_detections(frame, det, now)
+                overlay_detections(frame, det, now, max_age_s=max_box_age_s)
 
             # Aggressive: skip letterboxing if frame already at target size
             if frame.shape[1] == display_w and frame.shape[0] == display_h:
@@ -187,10 +208,10 @@ def load_camera_feed(source: int | str) -> None:
             else:
                 frame_letterboxed = letterbox_frame(frame, display_w, display_h)
 
-            elapsed = now - prev_time
-            if elapsed > 0:
-                actual_fps = 1.0 / elapsed
-            prev_time = now
+            present_elapsed = now - last_present_ts
+            if present_elapsed > 0:
+                actual_fps = 1.0 / present_elapsed
+            last_present_ts = now
 
             cv2.putText(frame_letterboxed, f"FPS: {actual_fps:.0f}",
                         (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
@@ -210,8 +231,10 @@ def load_camera_feed(source: int | str) -> None:
                 pass
             first_frame = False
 
-            # Aggressive: no frame rate limiting - always wait 1ms for display refresh
-            key = cv2.waitKey(1) & 0xFF
+            work_time = time.monotonic() - loop_start
+            wait_s = frame_interval - work_time
+            wait_ms = 1 if frame_interval <= 0 else max(1, int(wait_s * 1000))
+            key = cv2.waitKey(wait_ms) & 0xFF
             if key in (ord("q"), ord("Q"), 27):  # 27 = ESC
                 break
             if cv2.getWindowProperty("eyeTool - Camera Feed",
@@ -345,8 +368,7 @@ class _MppVideoWriter:
         self._proc: subprocess.Popen | None = None
         self._opened = False
         self._frame_size = width * height * 3  # BGR
-        self._write_lock = threading.Lock()
-        self._pending_frame: bytes | None = None
+        self._frame_queue: queue.Queue[np.ndarray] = queue.Queue(maxsize=1)
         self._stop_event = threading.Event()
         self._writer_thread: threading.Thread | None = None
 
@@ -380,18 +402,17 @@ class _MppVideoWriter:
     def _writer_loop(self) -> None:
         """Background thread that drains pending frames into the pipe."""
         while not self._stop_event.is_set():
-            data = None
-            with self._write_lock:
-                data = self._pending_frame
-                self._pending_frame = None
-            if data is not None:
-                try:
-                    self._proc.stdin.write(data)
-                except (BrokenPipeError, OSError):
-                    self._opened = False
-                    return
-            else:
-                time.sleep(0.005)
+            try:
+                frame = self._frame_queue.get(timeout=0.02)
+            except queue.Empty:
+                continue
+            if frame is None:
+                continue
+            try:
+                self._proc.stdin.write(frame.tobytes())
+            except (BrokenPipeError, OSError):
+                self._opened = False
+                return
 
     def isOpened(self) -> bool:
         return self._opened and self._proc is not None and self._proc.poll() is None
@@ -399,17 +420,30 @@ class _MppVideoWriter:
     def write(self, frame: np.ndarray) -> None:
         if not self.isOpened():
             return
-        with self._write_lock:
-            self._pending_frame = frame.tobytes()
+        if self._frame_queue.full():
+            try:
+                self._frame_queue.get_nowait()
+            except queue.Empty:
+                pass
+        try:
+            self._frame_queue.put_nowait(frame.copy())
+        except queue.Full:
+            pass
 
     def release(self) -> None:
         self._stop_event.set()
+        last_frame = None
+        while True:
+            try:
+                last_frame = self._frame_queue.get_nowait()
+            except queue.Empty:
+                break
         if self._writer_thread is not None:
             self._writer_thread.join(timeout=2)
-        # Drain any remaining frame
-        if self._proc is not None and self._pending_frame is not None:
+        # Drain latest queued frame, if any.
+        if self._proc is not None and last_frame is not None:
             try:
-                self._proc.stdin.write(self._pending_frame)
+                self._proc.stdin.write(last_frame.tobytes())
             except (BrokenPipeError, OSError):
                 pass
         if self._proc is not None:
@@ -620,15 +654,19 @@ def load_multi_camera_feed() -> None:
     # tile's letterboxed crop. Render order: zone polygon -> boxes (so
     # boxes always sit on top of the translucent fill).
     _now_ts_ref = [time.monotonic()]
+    max_box_age_s: float | None = None
+    if low_latency_profile and detection_enabled:
+        max_box_age_s = max_box_age_ms / 1000.0
     def _tile_overlay(slot_id, tile, scale, off_x, off_y, snap):
         zone = zones.get(slot_id)
         if zone is not None:
-            zone.draw_on_tile(tile, scale, off_x, off_y)
+            zone.draw_on_tile(tile, scale, off_x, off_y, draw_fill=zone_fill)
         if detector is None:
             return
         det = detector.get_result(slot_id)
         overlay_tile_detections(tile, det, scale, off_x, off_y,
-                                 _now_ts_ref[0], zone=zone)
+                                _now_ts_ref[0], zone=zone,
+                                max_age_s=max_box_age_s)
     compositor.set_overlay(_tile_overlay)
 
     global _quit_requested
@@ -674,14 +712,20 @@ def load_multi_camera_feed() -> None:
 
     print(f"Multi-camera feed: {display_w}x{display_h}, target {_target_fps} FPS, {max_streams} slots")
     print(f"Detection: {det_status}  |  conf: {detection_confidence}  |  every-N: {detect_every_n}  |  NPU: {multi_status}")
+    if low_latency_profile:
+        fill_status = "ON" if zone_fill else "OFF"
+        print(f"Low-latency profile: ON  |  stale box cutoff: {max_box_age_ms} ms  |  zone fill: {fill_status}")
     print("Press 'q'/ESC on the window, or Ctrl+C here to quit.")
 
     create_fullscreen_window("eyeTool - Multi Feed")
     first_frame = True
     last_stats_ts = time.monotonic()
     frame_interval = 1.0 / _target_fps if _target_fps > 0 else 0.0
-    prev_time = time.monotonic()
+    last_present_ts = time.monotonic()
     actual_fps = 0.0
+    next_fullscreen_ts = 0.0
+    next_window_check_ts = 0.0
+    next_segment_check_ts = 0.0
 
     loop_error_count = 0
     max_loop_errors = 10
@@ -691,7 +735,8 @@ def load_multi_camera_feed() -> None:
     try:
         while not _quit_requested:
             try:
-                now = time.monotonic()
+                loop_start = time.monotonic()
+                now = loop_start
                 _now_ts_ref[0] = now  # tile overlay reads this for staleness colour
                 
                 try:
@@ -715,18 +760,23 @@ def load_multi_camera_feed() -> None:
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6,
                             (255, 255, 255), 2, cv2.LINE_AA)
 
-                elapsed = now - prev_time
-                if elapsed > 0:
-                    actual_fps = 1.0 / elapsed
-                prev_time = now
+                present_elapsed = now - last_present_ts
+                if present_elapsed > 0:
+                    actual_fps = 1.0 / present_elapsed
+                last_present_ts = now
 
                 cv2.putText(canvas, f"{actual_fps:4.1f} FPS",
                             (display_w - 90, 16),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1,
                             cv2.LINE_AA)
 
-                # Check for segment split (2-minute segments)
-                segment_elapsed = now - _segment_start_time
+                # Check for segment split less frequently to keep display
+                # loop lightweight.
+                if now >= next_segment_check_ts:
+                    next_segment_check_ts = now + 0.5
+                    segment_elapsed = now - _segment_start_time
+                else:
+                    segment_elapsed = 0.0
                 if segment_elapsed >= (segment_duration * 60.0):
                     print(f"Segment split ({segment_duration} min): closing current file...")
                     try:
@@ -734,10 +784,7 @@ def load_multi_camera_feed() -> None:
                             writer.release()
                     except Exception as e:
                         print(f"[ERROR] Failed to release writer: {e}")
-                    
-                    # Cleanup old files if disk is above threshold
-                    _cleanup_old_files(save_dir, storage_threshold)
-                    
+
                     ts = time.strftime("%Y%m%d_%H%M%S")
                     new_path = os.path.join(save_dir, f"multifeed_{ts}{ext}")
                     print(f"Segment split: opening new file -> {new_path}")
@@ -749,6 +796,11 @@ def load_multi_camera_feed() -> None:
                             output_path = new_path
                             frames_written = 0
                             print(f"Segment split: success")
+                            threading.Thread(
+                                target=_cleanup_old_files,
+                                args=(save_dir, storage_threshold),
+                                daemon=True,
+                            ).start()
                         else:
                             print("Error: could not open new file after segment split.")
                             recording = False
@@ -786,11 +838,15 @@ def load_multi_camera_feed() -> None:
                     last_stats_ts = now
 
                 cv2.imshow("eyeTool - Multi Feed", canvas)
-                set_fullscreen("eyeTool - Multi Feed")
+                if first_frame or now >= next_fullscreen_ts:
+                    set_fullscreen("eyeTool - Multi Feed")
+                    next_fullscreen_ts = now + 1.0
                 first_frame = False
 
-                # Frame rate limiting: calculate wait time to achieve target FPS
-                wait_ms = max(1, int(frame_interval * 1000 - elapsed * 1000))
+                # Frame pacing: use work time from this iteration.
+                work_time = time.monotonic() - loop_start
+                wait_s = frame_interval - work_time
+                wait_ms = 1 if frame_interval <= 0 else max(1, int(wait_s * 1000))
                 key = cv2.waitKey(wait_ms) & 0xFF
                 # Check quit flag after waitKey in case signal fired during wait
                 if _quit_requested:
@@ -800,16 +856,17 @@ def load_multi_camera_feed() -> None:
                     print("User requested quit via key press")
                     break
                 
-                # Check window visibility - but be more lenient for monitoring systems
-                try:
-                    window_visible = cv2.getWindowProperty("eyeTool - Multi Feed", cv2.WND_PROP_VISIBLE)
-                    if window_visible < 0.5:  # More lenient threshold
-                        print(f"Window visibility check failed: {window_visible}, attempting to recreate window")
-                        # Try to recreate the window instead of exiting
-                        create_fullscreen_window("eyeTool - Multi Feed")
-                except Exception as e:
-                    print(f"[ERROR] Window visibility check failed: {e}")
-                    # Don't exit on window check errors in monitoring mode
+                # Throttle window visibility checks to avoid X11 overhead.
+                if now >= next_window_check_ts:
+                    next_window_check_ts = now + 1.0
+                    try:
+                        window_visible = cv2.getWindowProperty("eyeTool - Multi Feed", cv2.WND_PROP_VISIBLE)
+                        if window_visible < 0.5:  # More lenient threshold
+                            print(f"Window visibility check failed: {window_visible}, attempting to recreate window")
+                            create_fullscreen_window("eyeTool - Multi Feed")
+                            next_fullscreen_ts = now
+                    except Exception as e:
+                        print(f"[ERROR] Window visibility check failed: {e}")
                 
                 # Reset error count on successful iteration
                 loop_error_count = 0
@@ -1364,18 +1421,25 @@ def setup_preprocess_for_slot(slot_id: int) -> bool:
 
 def detection_settings_menu() -> None:
     """Interactive sub-menu for YOLO detection settings."""
-    global detection_enabled, detection_confidence, target_fps, detect_every_n, use_multi_core
+    global detection_enabled, detection_confidence, target_fps
+    global detect_every_n, use_multi_core
+    global low_latency_profile, max_box_age_ms, zone_fill
     while True:
         det_status = "ON" if detection_enabled else "OFF"
         multi_status = "3-CORE" if use_multi_core else "1-CORE"
+        ll_status = "ON" if low_latency_profile else "OFF"
+        fill_status = "ON" if zone_fill else "OFF"
         print(f"\n--- Detection Settings ---")
         print(f"  1. Toggle detection [{det_status}]")
         print(f"  2. Set confidence threshold [{detection_confidence:.2f}]")
         print(f"  3. Set target display FPS [{target_fps}]")
         print(f"  4. Detect every N captured frames [{detect_every_n}]")
         print(f"  5. Use 3 NPU cores (round-robin) [{multi_status}]")
-        print(f"  6. Back to main menu")
-        raw = input("Enter choice (1-6): ").strip()
+        print(f"  6. Toggle low-latency profile [{ll_status}]")
+        print(f"  7. Set max detection box age ms [{max_box_age_ms}]")
+        print(f"  8. Toggle zone fill overlay [{fill_status}]")
+        print(f"  9. Back to main menu")
+        raw = input("Enter choice (1-9): ").strip()
         if raw == "1":
             detection_enabled = not detection_enabled
             print(f"Detection {'enabled' if detection_enabled else 'disabled'}.")
@@ -1421,6 +1485,24 @@ def detection_settings_menu() -> None:
             print("  3-CORE: round-robin across NPU_CORE_0/1/2 (~3× detection rate)")
             print("  1-CORE: single NPU_CORE_AUTO (lower power, ~10 Hz detect)")
         elif raw == "6":
+            low_latency_profile = not low_latency_profile
+            print(f"Low-latency profile {'enabled' if low_latency_profile else 'disabled'}.")
+        elif raw == "7":
+            val = input(f"Max detection box age ms (0-2000) [{max_box_age_ms}]: ").strip()
+            if val:
+                try:
+                    v = int(val)
+                    if 0 <= v <= 2000:
+                        max_box_age_ms = v
+                        print(f"Max detection box age set to {max_box_age_ms} ms.")
+                    else:
+                        print("Value must be between 0 and 2000.")
+                except ValueError:
+                    print("Invalid number.")
+        elif raw == "8":
+            zone_fill = not zone_fill
+            print(f"Zone fill {'enabled' if zone_fill else 'disabled'}.")
+        elif raw == "9":
             _save_detection_settings()
             print("Detection settings saved to user_settings.json")
             break

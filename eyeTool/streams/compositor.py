@@ -52,11 +52,18 @@ def _letterbox_into(canvas_tile: np.ndarray, frame: np.ndarray) -> tuple[float, 
     scale = min(tw / fw, th / fh)
     new_w = max(1, int(round(fw * scale)))
     new_h = max(1, int(round(fh * scale)))
-    resized = cv2.resize(frame, (new_w, new_h),
-                         interpolation=cv2.INTER_LINEAR)
+
+    # Fast path: tile is fully covered (e.g. 1280x720 -> 960x540).
+    # Avoid background fill + subregion copy on the hot path.
+    if new_w == tw and new_h == th:
+        cv2.resize(frame, (tw, th), dst=canvas_tile,
+                   interpolation=cv2.INTER_LINEAR)
+        return scale, 0, 0
+
+    resized = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
     off_x = (tw - new_w) // 2
     off_y = (th - new_h) // 2
-    canvas_tile[:] = _TILE_BG
+    canvas_tile.fill(_TILE_BG[0])
     canvas_tile[off_y:off_y + new_h, off_x:off_x + new_w] = resized
     return scale, off_x, off_y
 
@@ -129,6 +136,7 @@ class GridCompositor:
         self.tile_w = display_w // grid_cols
         self.tile_h = display_h // grid_rows
         self._overlay_cb = None  # callable(slot_id, tile, scale, off_x, off_y, snap)
+        self._canvas = np.empty((self.display_h, self.display_w, 3), dtype=np.uint8)
 
     def set_overlay(self, callback) -> None:
         """Register a per-tile overlay drawer (e.g. detection boxes)."""
@@ -140,8 +148,8 @@ class GridCompositor:
         return col * self.tile_w, row * self.tile_h
 
     def render(self, snapshots: list[StreamSnapshot]) -> np.ndarray:
-        canvas = np.full((self.display_h, self.display_w, 3),
-                         _BG, dtype=np.uint8)
+        canvas = self._canvas
+        canvas.fill(_BG[0])
         # Index by slot id so we always render in slot order.
         by_slot = {s.slot_id: s for s in snapshots}
         for slot_id in range(self.cols * self.rows):

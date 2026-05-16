@@ -322,7 +322,8 @@ STALE_THRESHOLD_S = 0.2  # boxes older than 200 ms render yellow
 
 
 def overlay_detections(frame: np.ndarray, det: DetectionResult | None,
-                       now_ts: float, person_only: bool = True) -> int:
+                      now_ts: float, person_only: bool = True,
+                      max_age_s: float | None = None) -> int:
     """Draw the *det* boxes on *frame* in-place; return person count.
 
     Boxes are rendered yellow if the source frame is > ``STALE_THRESHOLD_S``
@@ -332,6 +333,8 @@ def overlay_detections(frame: np.ndarray, det: DetectionResult | None,
         return 0
 
     age = now_ts - det.frame_ts
+    if max_age_s is not None and age > max_age_s:
+        return 0
     colour = YELLOW if age > STALE_THRESHOLD_S else GREEN
 
     # Boxes are in 640-input letterboxed space referenced to (det.frame_w,
@@ -370,7 +373,8 @@ def overlay_tile_detections(tile: np.ndarray, det: DetectionResult | None,
                             now_ts: float,
                             person_only: bool = True,
                             stale_age_s: float = STALE_THRESHOLD_S,
-                            zone=None) -> tuple[int, int]:
+                            zone=None,
+                            max_age_s: float | None = None) -> tuple[int, int]:
     """Draw *det* boxes on a compositor *tile* (post-letterbox).
 
     Two transforms compose:
@@ -393,6 +397,8 @@ def overlay_tile_detections(tile: np.ndarray, det: DetectionResult | None,
     if det is None or det.boxes.shape[0] == 0:
         return 0, 0
     age = now_ts - det.frame_ts
+    if max_age_s is not None and age > max_age_s:
+        return 0, 0
     is_stale = age > stale_age_s
     pad_w, pad_h = det.pad
     inv_infer = 1.0 / det.scale if det.scale else 1.0

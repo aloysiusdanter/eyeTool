@@ -111,7 +111,8 @@ class Zone:
 
     # ---- rendering -------------------------------------------------
     def draw_on_tile(self, tile: np.ndarray,
-                     tile_scale: float, off_x: int, off_y: int) -> None:
+                     tile_scale: float, off_x: int, off_y: int,
+                     draw_fill: bool = True) -> None:
         """Map polygon from frame-space into the tile and draw it.
 
         ``tile_scale``, ``off_x``, ``off_y`` come from the compositor's
@@ -124,10 +125,12 @@ class Zone:
         pts[:, 0] = pts[:, 0] * tile_scale + off_x
         pts[:, 1] = pts[:, 1] * tile_scale + off_y
         pts_i = pts.astype(np.int32)
-        # Translucent fill via per-channel addWeighted on a copy of the tile.
-        overlay = tile.copy()
-        cv2.fillPoly(overlay, [pts_i], COLOR_FILL)
-        cv2.addWeighted(overlay, FILL_ALPHA, tile, 1.0 - FILL_ALPHA, 0, dst=tile)
+        # Optional translucent fill via per-channel addWeighted on a copy
+        # of the tile.
+        if draw_fill:
+            overlay = tile.copy()
+            cv2.fillPoly(overlay, [pts_i], COLOR_FILL)
+            cv2.addWeighted(overlay, FILL_ALPHA, tile, 1.0 - FILL_ALPHA, 0, dst=tile)
         # Solid outline on top
         cv2.polylines(tile, [pts_i], isClosed=True,
                       color=COLOR_OUTLINE, thickness=1, lineType=cv2.LINE_AA)

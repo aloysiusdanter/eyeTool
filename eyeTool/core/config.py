@@ -46,6 +46,9 @@ MANUFACTURER_DEFAULTS: dict[str, Any] = {
         "use_multi_core": False,
         "person_class_id": 0,
         "target_fps": 30,
+        "low_latency_profile": False,
+        "max_box_age_ms": 120,
+        "zone_fill": True,
     },
     "streams": {
         "max_streams": 4,
